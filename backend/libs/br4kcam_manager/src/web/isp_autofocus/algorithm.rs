@@ -2178,6 +2178,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn takes_no_noise_on_the_floor_for_a_peak() {
+        // Camera .10's centre v2 away from focus: 9 to 15, noise sd 3 to 6, against a peak of
+        // about 110 (`reports/isp-af-r2.md`).
+        for (seed, start) in [(15, 981.0), (16, 1296.0), (17, 981.0), (18, 1296.0)] {
+            let mut sim = Sim::new(seed, 1040.0, start);
+            sim.height = 100.0;
+            sim.floor = (13.0, 4.0);
+            let landing = focus(&mut sim).await.unwrap();
+            sim.wait(0.6).await.unwrap();
+            assert!(
+                sim.error().abs() < 4.0,
+                "{start}: {landing:?} {}",
+                sim.error()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn takes_no_lens_at_rest_for_a_peak() {
         // `reports/isp-af-r2.md`: at zoom 1.7 a weak peak, blurred by the full-speed pass,
         // spiked under what the lens saw resting at the window's end. The pass took the end
