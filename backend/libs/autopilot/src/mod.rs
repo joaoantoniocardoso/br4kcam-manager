@@ -349,6 +349,29 @@ pub async fn handle_control(actuators_control: api::ActuatorsControl) -> Result<
     control_inner(Json(actuators_control)).await
 }
 
+/// Sends a camera's focus, 0 to 100 % of its travel, and returns once the autopilot takes
+/// the command. Unlike `SetActuatorsState` it does not read the outputs back, which waits
+/// for the script's next run: a caller that needs them watches them (see
+/// [`watch_lens_outputs`]).
+#[instrument(level = "debug")]
+pub async fn send_focus(camera_uuid: Uuid, focus: f32) -> Result<()> {
+    let parameters = {
+        let manager = MANAGER.get().context("Not available")?.read().await;
+        manager
+            .settings
+            .actuators
+            .get(&camera_uuid)
+            .context(crate::ACTUATORS_NOT_CONFIGURED)?
+            .parameters
+            .clone()
+    };
+    let focus = api::ActuatorsState {
+        focus: Some(focus),
+        ..Default::default()
+    };
+    manager::Manager::apply_state_setpoints(&focus, &parameters).await
+}
+
 #[instrument(level = "debug")]
 pub(crate) async fn control_inner(
     actuators_control: Json<api::ActuatorsControl>,
