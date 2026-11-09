@@ -12,7 +12,7 @@ pub(crate) mod afstat;
 mod algorithm;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::Ipv4Addr,
     sync::{
         Arc, LazyLock, Mutex,
@@ -33,7 +33,7 @@ use tracing::*;
 use uuid::Uuid;
 
 use crate::web::control_bridge::{ControlError, UNKNOWN_CAMERA};
-use algorithm::{CONSTANTS, Env, Frame, LANDED_RATIO, READER_TIMEOUT};
+use algorithm::{CONSTANTS, Constants, Env, Frame, LANDED_RATIO, Landing, READER_TIMEOUT};
 
 /// How long the first reported outputs may take, at the stream's 10 Hz.
 const FIRST_OUTPUTS: Duration = Duration::from_secs(2);
@@ -58,6 +58,76 @@ static RUNS: LazyLock<Mutex<HashMap<Uuid, Run>>> = LazyLock::new(Default::defaul
 
 fn runs() -> std::sync::MutexGuard<'static, HashMap<Uuid, Run>> {
     RUNS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// How many of a camera's own coarse biases per direction, and ramp biases, are kept.
+const LEARNED: usize = 5;
+/// How far a camera's coarse bias may be from the model's, µs: Focus now on both units
+/// measured −26 to +2 falling and +12 to +35 rising (`reports/isp-af-r2.md`).
+const LEARN_RANGE: f64 = 40.0;
+/// How far a camera's ramp bias may be from the model's, µs: ten times its scatter within a
+/// unit (`reports/isp-af-r4.md`).
+const RAMP_LEARN_RANGE: f64 = 8.0;
+
+/// The coarse biases each camera's focused runs measured, falling and rising, and its ramp
+/// biases, newest last. They moved by 25 µs on one unit between two sessions
+/// (`reports/isp-af-r2.md`), and a certified landing measures its own passes' biases to about a
+/// µs.
+static BIASES: LazyLock<Mutex<HashMap<Uuid, [VecDeque<f64>; 3]>>> = LazyLock::new(Default::default);
+
+/// The constants for a camera: its own coarse biases, once its runs measured them.
+fn constants(camera_uuid: Uuid) -> Constants {
+    let mut k = CONSTANTS;
+    let biases = BIASES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some([falling, rising, ramp]) = biases.get(&camera_uuid) {
+        k.coarse_bias_f = median(falling).unwrap_or(k.coarse_bias_f);
+        k.coarse_bias_r = median(rising).unwrap_or(k.coarse_bias_r);
+        k.ramp_bias = median(ramp).unwrap_or(k.ramp_bias);
+        (k.coarse_learned_f, k.coarse_learned_r, k.ramp_learned) =
+            (falling.len(), rising.len(), ramp.len());
+    }
+    k
+}
+
+/// Keeps the coarse and ramp biases a certified run measured, unless one is further from the
+/// model's than the units' spread allows: a lock on something else.
+fn learn(camera_uuid: Uuid, landing: &Landing) {
+    let model = if landing.falling {
+        CONSTANTS.coarse_bias_f
+    } else {
+        CONSTANTS.coarse_bias_r
+    };
+    let mut biases = BIASES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let kept = biases.entry(camera_uuid).or_default();
+    // A run started on the peak, or with no ramp, measures no such bias (NaN).
+    for (index, bias, model, range) in [
+        (
+            usize::from(!landing.falling),
+            landing.coarse_bias,
+            model,
+            LEARN_RANGE,
+        ),
+        (2, landing.ramp_bias, CONSTANTS.ramp_bias, RAMP_LEARN_RANGE),
+    ] {
+        if bias.is_nan() || (bias - model).abs() > range {
+            continue;
+        }
+        kept[index].push_back(bias);
+        if kept[index].len() > LEARNED {
+            kept[index].pop_front();
+        }
+    }
+}
+
+fn median(values: &VecDeque<f64>) -> Option<f64> {
+    let mut sorted: Vec<f64> = values.iter().copied().collect();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    (n > 0).then(|| (sorted[(n - 1) / 2] + sorted[n / 2]) / 2.0)
 }
 
 /// Starts listening for the cameras' AF statistics.
@@ -310,12 +380,14 @@ fn command_sender(camera_uuid: Uuid) -> (mpsc::UnboundedSender<u16>, Arc<AtomicB
 async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
     let started = Instant::now();
     let camera_uuid = env.camera_uuid;
+    let k = constants(camera_uuid);
+    info!(
+        "Focus now of {camera_uuid}: coarse biases F {:.1} R {:.1}, ramp bias {:.2} ({}), limits {limits:?}",
+        k.coarse_bias_f, k.coarse_bias_r, k.ramp_bias, k.ramp_learned
+    );
     // The camera on every line of the run: two cameras can focus at once.
     let span = info_span!("focus_now", camera = %camera_uuid);
-    let result = match algorithm::run(&mut env, &CONSTANTS, &limits)
-        .instrument(span)
-        .await
-    {
+    let result = match algorithm::run(&mut env, &k, &limits).instrument(span).await {
         Ok(landing) => {
             let focus = env.window.percent(env.window.input_for(landing.u));
             let ratio = Some(landing.ratio as f32);
@@ -337,6 +409,10 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
                     ..result(FocusNowOutcome::SceneChanged, message, started, None)
                 }
             } else {
+                // Only a certified landing is the truth the passes' biases are measured against.
+                if landing.certified {
+                    learn(camera_uuid, &landing);
+                }
                 // The script's input takes the landing, so the focus slider shows it and the
                 // zoom correlation keeps it; its output is the one landed on.
                 if let Err(error) = autopilot::send_focus(camera_uuid, focus).await {
