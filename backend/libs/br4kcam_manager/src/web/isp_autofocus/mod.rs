@@ -658,3 +658,68 @@ impl Env for LiveEnv {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Camera .10's focus calibration, from its `getActuatorsConfig`.
+    fn window(zoom: i64) -> Window {
+        Window {
+            input_min: 870,
+            input_max: 2130,
+            zoom,
+            closest: vec![
+                (870, 949),
+                (986, 975),
+                (1191, 1102),
+                (1413, 1277),
+                (1617, 1518),
+                (1771, 1836),
+                (1831, 2057),
+                (1951, 2556),
+            ],
+            furthest: vec![
+                (870, 834),
+                (986, 905),
+                (1191, 1011),
+                (1413, 1168),
+                (1617, 1359),
+                (1771, 1571),
+                (1831, 1699),
+                (1951, 2159),
+            ],
+            gain: 1.0,
+            correlation: true,
+            output_max: 2130,
+        }
+    }
+
+    /// The focus input the script takes from a focus command in % (`follow`, then rounded).
+    fn input(window: &Window, percent: f32) -> i64 {
+        let span = (window.input_max - window.input_min) as f64;
+        let value = f64::from(percent).clamp(0.0, 100.0);
+        (window.input_min as f64 + value * span / 100.0 + 0.5).floor() as i64
+    }
+
+    #[test]
+    fn maps_the_focus_slider_as_the_script() {
+        // The windows measured on the camera, zoom 1.06, 1.4 and 1.7 (af-isp-10 §2).
+        for (zoom, ends) in [
+            (990, (831.0, 1053.0)),
+            (1301, (981.0, 1296.0)),
+            (1576, (1160.0, 1629.0)),
+            // Zoom 2.0: the slider reaches 2527, the servo stops at its channel's max.
+            (1850, (1380.0, 2130.0)),
+        ] {
+            assert_eq!(window(zoom).ends(), ends);
+        }
+        let window = window(1301);
+        for one in window.input_min..=window.input_max {
+            assert_eq!(input(&window, window.percent(one)), one);
+        }
+        for u in [981.0, 1100.4, 1296.0] {
+            assert!((window.output(window.input_for(u)) as f64 - u).abs() <= 0.5);
+        }
+    }
+}
