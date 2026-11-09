@@ -211,3 +211,71 @@ pub struct ProCapabilities {
     pub tilt: Option<Range>,
     pub aperture: Aperture,
 }
+
+/// How a Focus now ended.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowOutcome {
+    /// Landed on the sharpest focus the camera's statistics saw.
+    Focused,
+    /// Landed, but the sharpness there is well under the peak the search saw: the scene
+    /// changed, or the landing missed.
+    SceneChanged,
+    /// No sharpness peak across the whole focus range: too little detail at the centre.
+    LowTexture,
+    /// The fine search around the coarse peak saw none.
+    NoPeak,
+    /// No AF statistics arrive from the camera: its reader is not running.
+    ReaderMissing,
+    /// A focus command never reached the lens.
+    CommandLost,
+    /// Focus or zoom moved by something else meanwhile: stopped there.
+    FocusMoved,
+    /// Stopped on request.
+    Stopped,
+    /// The camera has no motorized lens, or is not a Scripting camera.
+    NotAvailable,
+}
+
+/// Which step a Focus now is on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowPhase {
+    /// One fast pass through the whole focus range, to find the peak roughly.
+    Coarse,
+    /// A slow pass over the peak, to place it.
+    Fine,
+    /// Moving onto the peak.
+    Land,
+}
+
+/// The end of the last Focus now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct FocusNowResult {
+    pub outcome: FocusNowOutcome,
+    /// What happened, worded for the user.
+    pub message: String,
+    /// When it ended.
+    #[ts(type = "string")]
+    pub finished_at: chrono::DateTime<chrono::Utc>,
+    /// How long it ran, in seconds.
+    pub seconds: f32,
+    /// Sharpness at the landing over the peak's, from the camera's statistics, or null when
+    /// it did not land.
+    pub ratio: Option<f32>,
+    /// Where it left the focus, in %, or null when it did not move it there.
+    pub focus: Option<f32>,
+}
+
+/// Focus now of one camera: a search for the sharpest focus at the centre of the picture,
+/// on the camera's own AF statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct FocusNowStatus {
+    /// Whether the camera's AF statistics arrive; Focus now needs them.
+    pub reader_running: bool,
+    /// Whether a Focus now is running.
+    pub running: bool,
+    /// Its step while it runs.
+    pub phase: Option<FocusNowPhase>,
+    pub last: Option<FocusNowResult>,
+}
