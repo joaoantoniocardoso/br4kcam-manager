@@ -20,7 +20,7 @@ use axum::{
 use br4kcam_api::{
     CameraStateEvent, ConnectionStats, SystemHealth, WsClientMessage, WsEvent, WsRequest,
     WsResponse, events,
-    pro::{ProCapabilities, ProSettings, ProState},
+    pro::{FocusNowContinuous, FocusNowStatus, ProCapabilities, ProSettings, ProState},
 };
 use br4kcam_commands::CameraControl;
 use br4kcam_manager::web::routes::{
@@ -272,6 +272,8 @@ fn wire_types() {
                 types.visit::<ProState>();
                 types.visit::<ProSettings>();
                 types.visit::<ProCapabilities>();
+                types.visit::<FocusNowStatus>();
+                types.visit::<FocusNowContinuous>();
             })
         );
     });
