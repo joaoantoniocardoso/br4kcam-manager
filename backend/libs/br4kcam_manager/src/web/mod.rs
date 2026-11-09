@@ -62,6 +62,7 @@ pub fn request_restart() {
 pub async fn run(address: std::net::SocketAddr, default_api_version: u8) -> ShutdownReason {
     // A prior in-process restart left this set; clear it so wait_shutdown blocks again.
     prepare_run();
+    isp_autofocus::start_listening();
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let mut first = true;
