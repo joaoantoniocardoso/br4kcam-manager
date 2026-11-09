@@ -13,6 +13,7 @@ pub(crate) mod camera_state;
 pub(crate) mod camera_ui;
 pub(crate) mod connectivity;
 pub(crate) mod control_bridge;
+pub(crate) mod isp_autofocus;
 pub(crate) mod one_push_awb;
 pub mod routes;
 pub(crate) mod ws_connections;
