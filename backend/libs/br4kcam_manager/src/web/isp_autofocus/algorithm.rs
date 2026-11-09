@@ -1753,3 +1753,427 @@ fn interpolate(schedule: &[(f64, f64)], t: f64, before: f64, after: f64) -> f64 
         (Some((t0, u0)), Some(&(t1, u1))) => u0 + (u1 - u0) * (t - t0) / (t1 - t0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The procedure against the model of the drive (`plant.py`, §4): command path (straight
+    //! to the output, no Lua tick), servo dead time, lag and slew, play, landing scatter; and
+    //! the centre statistic
+    //! as a hump with frame noise, integrated over each frame.
+
+    use super::*;
+
+    /// SplitMix64, with Box-Muller normals.
+    struct Rng(u64);
+
+    impl Rng {
+        fn uniform(&mut self) -> f64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn normal(&mut self, sd: f64) -> f64 {
+            let (a, b) = (self.uniform().max(1e-12), self.uniform());
+            sd * (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+        }
+    }
+
+    /// The focus drive (`plant.py`, zoom 1.4 fit, §1.2).
+    struct Plant {
+        rng: Rng,
+        t: f64,
+        /// Shaft and lens positions, µs.
+        s: f64,
+        x: f64,
+        pwm: f64,
+        /// Commands on their way to the output: `(when it takes them, µs)`.
+        queue: Vec<(f64, f64)>,
+        report_phase: f64,
+        /// `(time first reported, PWM)`.
+        reported: Vec<(f64, f64)>,
+        /// PWM changes reaching the shaft after the dead time.
+        pending: Vec<(f64, f64)>,
+        target: f64,
+        noise: f64,
+        /// Shaft speed, µs/s.
+        speed: f64,
+        commands: usize,
+        /// Commands (by order) the autopilot never gets, and ones it takes 1.3 s late.
+        lost: Vec<usize>,
+        stalled: Vec<usize>,
+    }
+
+    const DT: f64 = 0.005;
+    const H: f64 = 15.5;
+    const C_F: f64 = 2.6;
+
+    impl Plant {
+        fn new(seed: u64, u: f64) -> Self {
+            let mut rng = Rng(seed);
+            let report_phase = rng.uniform() * 0.1;
+            Self {
+                rng,
+                t: 0.0,
+                s: u,
+                x: u - C_F,
+                pwm: u,
+                queue: Vec::new(),
+                report_phase,
+                reported: vec![(0.0, u)],
+                pending: Vec::new(),
+                target: u,
+                noise: 0.0,
+                speed: 0.0,
+                commands: 0,
+                lost: Vec::new(),
+                stalled: Vec::new(),
+            }
+        }
+
+        fn command(&mut self, u: f64) {
+            let n = self.commands;
+            self.commands += 1;
+            if self.lost.contains(&n) {
+                return;
+            }
+            // `DO_SET_SERVO` to the output, 0.013 to 0.033 s (`reports/isp-af-r3.md`).
+            let mut delay = 0.013 + 0.02 * self.rng.uniform();
+            if self.stalled.contains(&n) {
+                delay += 1.3;
+            }
+            // Delivered in order.
+            let at = self
+                .queue
+                .last()
+                .map_or(0.0, |&(at, _)| at)
+                .max(self.t + delay);
+            self.queue.push((at, u));
+        }
+
+        fn step(&mut self) {
+            self.t += DT;
+            let t = self.t;
+            // The output takes each command as it arrives; reported at 10 Hz.
+            while self.queue.first().is_some_and(|&(at, _)| at <= t) {
+                let pwm = self.queue.remove(0).1.round();
+                if pwm == self.pwm {
+                    continue;
+                }
+                self.pwm = pwm;
+                // §3.2: the lens moves 0.15 s after the tick as the frames see it, their own
+                // latency included (the 1/30 s stamp and the exposure, below); a command
+                // changed while the shaft moves takes 0.04 s more (a steady ramp's peak frame
+                // comes 0.373 s after the send, `reports/isp-af-r4.md`).
+                let dead = if self.speed.abs() > 5.0 { 0.14 } else { 0.10 };
+                self.pending.push((t + dead, self.pwm));
+                let at = self.report_phase + ((t - self.report_phase) / 0.1).ceil() * 0.1 + 0.01;
+                self.reported.push((at, self.pwm));
+            }
+            while self.pending.first().is_some_and(|&(at, _)| at <= t) {
+                let target = self.pending.remove(0).1;
+                // A ramp's next command, the shaft moving, keeps its error.
+                if target != self.target && self.speed.abs() <= 5.0 {
+                    let length = target - self.s;
+                    // A short falling move keeps a third of the landing error, scatters
+                    // 0.53 µs and stops 0.45 µs short; a long falling one lands within 0.32 µs
+                    // (`reports/isp-af-r4.md`), a rising one within 1 µs.
+                    self.noise = if -10.0 < length && length < 0.0 {
+                        0.34 * self.noise + self.rng.normal(0.5) + 0.45
+                    } else if length < 0.0 {
+                        self.rng.normal(0.32)
+                    } else {
+                        self.rng.normal(1.0)
+                    };
+                    // A short rising move stops short (a load against rising PWM).
+                    if 0.0 < length && length < 20.0 {
+                        self.noise -= (0.27 * length).min(2.2);
+                    }
+                }
+                self.target = target;
+            }
+            self.speed = ((self.target + self.noise - self.s) / 0.16).clamp(-257.0, 222.0);
+            self.s += self.speed * DT;
+            // The lens follows the shaft through the play.
+            self.x = self.x.clamp(self.s - C_F - H, self.s - C_F);
+        }
+    }
+
+    struct Sim {
+        plant: Plant,
+        /// Peak, height and sd of the centre v2 hump.
+        peak: f64,
+        height: f64,
+        /// v2 of something at the window's low end, in focus beyond it: a broad hump there.
+        low_end: f64,
+        /// The scene's own broad hump under the centre's, its height and sd, µs: what is out of
+        /// focus around the centre's detail, a pedestal near focus.
+        pedestal: (f64, f64),
+        /// Frame-wide steps of the floor's level, `(from when, by what factor)`: a black-level
+        /// re-set (`reports/af-dark-frames.md` §2.6: 3 to 16 % in v2).
+        hops: Vec<(f64, f64)>,
+        /// The lag-1 correlation of the floor's frame noise (temporal noise reduction at high
+        /// gain), and that noise now.
+        floor_rho: f64,
+        floor_noise: f64,
+        /// A light blinking on the scene, flat in focus: a square wave on the floor of this
+        /// height, period, s, and phase, s.
+        flicker: (f64, f64, f64),
+        /// v2 away from focus, and its frame noise (sd).
+        floor: (f64, f64),
+        /// The scene loses its detail from then on.
+        blank_after: f64,
+        /// The reader stops then.
+        reader_stops: f64,
+        window: (f64, f64),
+        last_sent: f64,
+        frames: Vec<Frame>,
+        exposure: Vec<f64>,
+        next_frame: f64,
+        /// What the run noted (`Env::note`).
+        notes: Vec<(f64, Option<f64>)>,
+        /// A wider window's hump height (none at 0), its frames, and whether the run reads them.
+        wide_height: f64,
+        frames_wide: Vec<Frame>,
+        wide: bool,
+        /// The hump's exponent (2 by default) and how much wider its side above the peak is,
+        /// and narrower the one below, as a fraction.
+        shape: f64,
+        skew: f64,
+    }
+
+    impl Sim {
+        fn new(seed: u64, peak: f64, start: f64) -> Self {
+            Self {
+                plant: Plant::new(seed, start),
+                peak,
+                height: 2000.0,
+                low_end: 0.0,
+                pedestal: (0.0, 20.0),
+                hops: Vec::new(),
+                floor_rho: 0.0,
+                floor_noise: 0.0,
+                flicker: (0.0, 1.0, 0.0),
+                floor: (0.0, 0.0),
+                blank_after: f64::INFINITY,
+                reader_stops: f64::INFINITY,
+                window: (981.0, 1296.0),
+                last_sent: start,
+                frames: Vec::new(),
+                exposure: Vec::new(),
+                next_frame: 0.0,
+                notes: Vec::new(),
+                wide_height: 0.0,
+                frames_wide: Vec::new(),
+                wide: false,
+                shape: 2.0,
+                skew: 0.0,
+            }
+        }
+
+        fn v2(&mut self, x: f64) -> f64 {
+            let height = if self.plant.t > self.blank_after {
+                0.0
+            } else {
+                self.height
+            };
+            let noise = 1.0 + self.plant.rng.normal(0.03);
+            let low_end = self.low_end * (-0.5 * ((x - self.window.0) / 25.0).powi(2)).exp();
+            let pedestal =
+                self.pedestal.0 * (-0.5 * ((x - self.peak) / self.pedestal.1).powi(2)).exp();
+            (height * generalized(x - self.peak, 3.4, self.shape, self.skew) + low_end + pedestal)
+                * noise
+        }
+
+        fn v1(&mut self, x: f64) -> f64 {
+            let noise = 1.0 + self.plant.rng.normal(0.03);
+            2400.0 * (0.04 + 0.96 * (-0.5 * ((x - self.peak) / 9.0).powi(2)).exp()) * noise
+        }
+
+        /// The lens's distance from the peak, µs.
+        fn error(&self) -> f64 {
+            self.plant.x - self.peak
+        }
+    }
+
+    impl Env for Sim {
+        fn window(&self) -> (f64, f64) {
+            self.window
+        }
+
+        fn now(&self) -> f64 {
+            self.plant.t
+        }
+
+        fn last_sent(&self) -> f64 {
+            self.last_sent
+        }
+
+        fn send(&mut self, u: f64) {
+            self.last_sent = u.round();
+            self.plant.command(self.last_sent);
+        }
+
+        /// Frames integrate the lens over their 1/30 s exposure and arrive a frame late.
+        async fn wait(&mut self, seconds: f64) -> Result<(), FocusNowOutcome> {
+            let end = self.plant.t + seconds;
+            while self.plant.t < end {
+                self.plant.step();
+                self.exposure.push(self.plant.x);
+                if self.plant.t >= self.next_frame {
+                    let xs = std::mem::take(&mut self.exposure);
+                    let (v2, v1) = xs.iter().fold((0.0, 0.0), |(v2, v1), &x| {
+                        (v2 + self.v2(x), v1 + self.v1(x))
+                    });
+                    let n = xs.len() as f64;
+                    if self.plant.t < self.reader_stops {
+                        let t = self.plant.t;
+                        let hops = self.hops.iter().filter(|&&(at, _)| at <= t);
+                        let (step, period, phase) = self.flicker;
+                        let on = ((t + phase) / period).fract() < 0.5;
+                        let level = self.floor.0 * hops.map(|&(_, by)| by).product::<f64>()
+                            + if on { step } else { 0.0 };
+                        let fresh = self.plant.rng.normal(self.floor.1);
+                        let rho = self.floor_rho;
+                        self.floor_noise =
+                            rho * self.floor_noise + (1.0 - rho * rho).sqrt() * fresh;
+                        let floor = level + self.floor_noise;
+                        self.frames.push(Frame {
+                            t: self.plant.t + 1.0 / 30.0,
+                            v2: v2 / n + floor,
+                            v1: v1 / n,
+                        });
+                        // The wide window: a broader hump, a quarter of the floor's noise.
+                        let wide = xs
+                            .iter()
+                            .map(|&x| (-0.5 * ((x - self.peak) / 6.0).powi(2)).exp())
+                            .sum::<f64>()
+                            / n;
+                        let floor = self.floor.0 + self.plant.rng.normal(self.floor.1 / 4.0);
+                        self.frames_wide.push(Frame {
+                            t: self.plant.t + 1.0 / 30.0,
+                            v2: self.wide_height * wide + floor,
+                            v1: v1 / n,
+                        });
+                    }
+                    self.next_frame += 1.0 / 30.0;
+                }
+            }
+            Ok(())
+        }
+
+        fn frames(&self, t0: f64, t1: f64) -> Vec<Frame> {
+            let frames = if self.wide {
+                &self.frames_wide
+            } else {
+                &self.frames
+            };
+            let frames = frames.iter().filter(|f| t0 <= f.t && f.t < t1);
+            frames.copied().collect()
+        }
+
+        fn outputs(&self, t0: f64, t1: f64) -> Vec<(f64, f64)> {
+            let t = self.plant.t;
+            let reported = self.plant.reported.iter().copied();
+            reported
+                .filter(|&(at, _)| t0 <= at && at < t1 && at <= t)
+                .collect()
+        }
+
+        fn phase(&mut self, _phase: FocusNowPhase) {}
+
+        fn note(&mut self, u: f64, v2: Option<f64>) {
+            self.notes.push((u, v2));
+        }
+
+        fn widen(&mut self) -> bool {
+            self.wide = self.wide_height > 0.0;
+            self.wide
+        }
+    }
+
+    /// An exponential-power hump at `d` from its peak over its height: of scale `sd` (its sd at
+    /// the exponent `shape` 2), its side above the peak `skew` wider and the one below as much
+    /// narrower.
+    fn generalized(d: f64, sd: f64, shape: f64, skew: f64) -> f64 {
+        let sd = sd * if d > 0.0 { 1.0 + skew } else { 1.0 - skew };
+        (-0.5 * (d / sd).abs().powf(shape)).exp()
+    }
+
+    /// The constants without the live biases, which the model does not have (§5.3).
+    const MODEL: Constants = Constants {
+        coarse_bias_f: 0.0,
+        coarse_bias_r: 0.0,
+        ..CONSTANTS
+    };
+
+    async fn focus(sim: &mut Sim) -> Result<Landing, FocusNowOutcome> {
+        // Settled where it starts.
+        sim.wait(0.5).await?;
+        run(sim, &MODEL, &FocusNowLimits::default()).await
+    }
+
+    #[tokio::test]
+    async fn focuses_from_either_end() {
+        for (seed, peak) in [(1, 1020.0), (2, 1100.0), (3, 1180.0), (4, 1260.0)] {
+            for start in [981.0, 1296.0] {
+                let mut sim = Sim::new(seed, peak, start);
+                let landing = focus(&mut sim).await.unwrap();
+                sim.wait(0.6).await.unwrap();
+                // On the hump (sd 3.4 µs): the model lands with a 1.3 µs sd.
+                assert!(
+                    sim.error().abs() < 4.0,
+                    "{peak} from {start}: {}",
+                    sim.error()
+                );
+                assert!(landing.seconds < 10.0, "{peak} from {start}: {landing:?}");
+                assert!(
+                    landing.ratio > LANDED_RATIO,
+                    "{peak} from {start}: {landing:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rides_out_late_and_lost_commands() {
+        // A ramp step 1.3 s late (timed by the reported outputs), then the move to the ramp
+        // lost (sent again).
+        for (late, lost) in [(Some(5), None), (None, Some(1))] {
+            let mut sim = Sim::new(5, 1100.0, 981.0);
+            sim.plant.stalled.extend(late);
+            sim.plant.lost.extend(lost);
+            let landing = focus(&mut sim).await.unwrap();
+            sim.wait(0.6).await.unwrap();
+            // A ramp stalled 1.3 s skews its hump: on the hump, or not called focused (over 60
+            // cases, 10 to 16 end ≥ 4 µs off with each preset's tuning and round 4's).
+            assert!(
+                sim.error().abs() < 4.0 || (late.is_some() && !landing.certified),
+                "{late:?} {lost:?}: {landing:?} {}",
+                sim.error()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_what_stops_it() {
+        let mut sim = Sim::new(6, 1100.0, 981.0);
+        sim.plant.lost.extend(1..1000);
+        assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::CommandLost));
+
+        let mut sim = Sim::new(7, 1100.0, 981.0);
+        sim.height = 5.0;
+        assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::LowTexture));
+
+        // The detail goes after the coarse pass.
+        let mut sim = Sim::new(8, 1100.0, 981.0);
+        sim.blank_after = 2.0;
+        assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::NoPeak));
+
+        let mut sim = Sim::new(9, 1100.0, 981.0);
+        sim.reader_stops = 2.0;
+        assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::ReaderMissing));
+    }
+}
