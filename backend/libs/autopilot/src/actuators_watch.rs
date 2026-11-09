@@ -12,7 +12,7 @@ use mavlink::{
     ardupilotmega::{MavMessage, SERVO_OUTPUT_RAW_DATA},
 };
 use once_cell::sync::{Lazy, OnceCell};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tracing::*;
 use uuid::Uuid;
 
@@ -215,6 +215,82 @@ pub async fn cached_actuators_state(camera_uuid: Uuid) -> Option<api::ActuatorsS
 /// Subscribe to throttled actuator state updates from the SERVO stream.
 pub fn subscribe() -> broadcast::Receiver<ActuatorsStateUpdate> {
     state_sender().subscribe()
+}
+
+/// A camera's focus and zoom outputs, in µs, as one `SERVO_OUTPUT_RAW` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LensOutputs {
+    pub focus: u16,
+    pub zoom: u16,
+}
+
+/// Every `SERVO_OUTPUT_RAW`'s focus and zoom outputs of a camera, with when it arrived,
+/// unthrottled, until the receiver is dropped; the stream is requested meanwhile. Only a
+/// motorized Scripting camera (the per-camera setup, see [`crate::parameters::Setup`]) has
+/// outputs that follow its own focus commands, so any other camera is refused.
+#[instrument(level = "debug")]
+pub async fn watch_lens_outputs(
+    camera_uuid: Uuid,
+) -> anyhow::Result<mpsc::UnboundedReceiver<(Instant, LensOutputs)>> {
+    use anyhow::Context;
+
+    let (focus_channel, zoom_channel) = {
+        let manager = MANAGER.get().context("Not available")?.read().await;
+        let parameters = &manager
+            .settings
+            .actuators
+            .get(&camera_uuid)
+            .context(crate::ACTUATORS_NOT_CONFIGURED)?
+            .parameters;
+        anyhow::ensure!(
+            parameters.has_motorized_lens(),
+            "The camera has no motorized lens"
+        );
+        (parameters.focus_channel, parameters.zoom_channel)
+    };
+    anyhow::ensure!(
+        crate::health::setup() == Some(crate::parameters::Setup::PerCamera)
+            && !crate::health::has_parameter_drift(&camera_uuid),
+        "The camera is not a Scripting camera: it needs ArduSub 4.8 or newer and its setup restored"
+    );
+    let (mut receiver, target_system) =
+        open_receiver().await.context("MAVLink is not connected")?;
+    let (sender, outputs) = mpsc::unbounded_channel();
+    add_interest();
+    tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                _ = sender.closed() => break,
+                message = receiver.recv() => message,
+            };
+            match message {
+                Ok(Message::Received((header, MavMessage::SERVO_OUTPUT_RAW(servo_output_raw))))
+                    if header.system_id == target_system
+                        && header.component_id
+                            == mavlink::ardupilotmega::MavComponent::MAV_COMP_ID_AUTOPILOT1
+                                as u8
+                        && servo_output_raw.port == 0 =>
+                {
+                    let (Some(focus), Some(zoom)) = (
+                        manager::get_output_raw_from_channel(&servo_output_raw, focus_channel),
+                        manager::get_output_raw_from_channel(&servo_output_raw, zoom_channel),
+                    ) else {
+                        continue;
+                    };
+                    if sender
+                        .send((Instant::now(), LensOutputs { focus, zoom }))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        remove_interest();
+    });
+    Ok(outputs)
 }
 
 /// Start the background SERVO_OUTPUT_RAW watcher once.
