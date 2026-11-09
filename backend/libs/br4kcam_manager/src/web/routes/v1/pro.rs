@@ -43,6 +43,7 @@ use tracing::*;
 use uuid::Uuid;
 
 use crate::web::control_bridge::{self, ControlError, UNKNOWN_CAMERA};
+use crate::web::isp_autofocus;
 
 const MODES: [ExposureMode; 3] = [
     ExposureMode::Program,
@@ -190,6 +191,11 @@ pub fn router() -> Router {
         .route("/{camera_uuid}", get(http_state).patch(http_set))
         .route("/{camera_uuid}/capabilities", get(http_capabilities))
         .route("/{camera_uuid}/white_balance/one_push", post(http_one_push))
+        .route(
+            "/{camera_uuid}/focus_now",
+            get(http_focus_now_status).post(http_focus_now),
+        )
+        .route("/{camera_uuid}/focus_now/stop", post(http_focus_now_stop))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
 }
@@ -220,6 +226,15 @@ pub(crate) async fn ws_request(
         ("POST", "white_balance/one_push") => {
             one_push(camera_uuid).await.map(|()| (202, Value::Null))
         }
+        ("GET", "focus_now") => isp_autofocus::status(camera_uuid)
+            .await
+            .map(|status| (200, json!(status))),
+        ("POST", "focus_now") => isp_autofocus::start(camera_uuid)
+            .await
+            .map(|status| (202, json!(status))),
+        ("POST", "focus_now/stop") => isp_autofocus::stop(camera_uuid)
+            .await
+            .map(|status| (200, json!(status))),
         _ => return None,
     };
 
@@ -259,6 +274,24 @@ async fn http_one_push(Path(camera_uuid): Path<Uuid>) -> Response {
         Ok(()) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(error),
     }
+}
+
+#[instrument(level = "debug")]
+async fn http_focus_now_status(Path(camera_uuid): Path<Uuid>) -> Response {
+    respond(isp_autofocus::status(camera_uuid).await)
+}
+
+#[instrument(level = "debug")]
+async fn http_focus_now(Path(camera_uuid): Path<Uuid>) -> Response {
+    match isp_autofocus::start(camera_uuid).await {
+        Ok(status) => (StatusCode::ACCEPTED, Json(status)).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+#[instrument(level = "debug")]
+async fn http_focus_now_stop(Path(camera_uuid): Path<Uuid>) -> Response {
+    respond(isp_autofocus::stop(camera_uuid).await)
 }
 
 fn bad_request(message: impl Into<String>) -> ControlError {
