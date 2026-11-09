@@ -779,6 +779,33 @@ mod tests {
     }
 
     #[test]
+    fn learns_a_cameras_coarse_biases() {
+        let camera_uuid = Uuid::from_u128(0x5eed);
+        assert_eq!(
+            constants(camera_uuid).coarse_bias_f,
+            CONSTANTS.coarse_bias_f
+        );
+        // The median of the last five falling ones, past one far off; the rising one stays
+        // the model's.
+        for coarse_bias in [-9.0, -1.0, -90.0, -7.0, -4.0, -6.0, -2.0] {
+            let landing = Landing {
+                u: 1000.0,
+                ratio: 1.0,
+                seconds: 8.0,
+                falling: true,
+                coarse_bias,
+                ramp_bias: f64::NAN,
+                certified: true,
+                sharpness: 0.9,
+            };
+            learn(camera_uuid, &landing);
+        }
+        let k = constants(camera_uuid);
+        assert_eq!(k.coarse_bias_f, -4.0);
+        assert_eq!(k.coarse_bias_r, CONSTANTS.coarse_bias_r);
+    }
+
+    #[test]
     fn maps_the_focus_slider_as_the_script() {
         // The windows measured on the camera, zoom 1.06, 1.4 and 1.7 (af-isp-10 §2).
         for (zoom, ends) in [
