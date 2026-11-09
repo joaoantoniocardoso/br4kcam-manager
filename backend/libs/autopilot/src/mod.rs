@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::*;
 use uuid::Uuid;
 
+pub use actuators_watch::{LensOutputs, watch_lens_outputs};
 pub use actuators_watch::{
     add_interest as add_actuators_state_interest, cache_is_fresh as actuators_cache_is_fresh,
     cached_actuators_state, interest_count as actuators_interest_count,
