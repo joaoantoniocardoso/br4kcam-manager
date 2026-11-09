@@ -1,12 +1,52 @@
 ---
 source: backend/libs/br4kcam_manager/tests/api_snapshots.rs
-expression: "declarations(&numeric_enums, |types|\n{\n    types.visit::<ProState>(); types.visit::<ProSettings>();\n    types.visit::<ProCapabilities>();\n})"
+expression: "declarations(&numeric_enums, |types|\n{\n    types.visit::<ProState>(); types.visit::<ProSettings>();\n    types.visit::<ProCapabilities>(); types.visit::<FocusNowStatus>();\n    types.visit::<FocusNowContinuous>();\n})"
 ---
 export type Aperture = "fixed";
 
 export type ExposureMode = "program" | "shutter" | "manual";
 
 export type ExposureWarning = "too_dark" | "too_bright";
+
+export type FocusNowContinuous = {
+    enabled: boolean,
+};
+
+export type FocusNowFallback = "kept_best" | "restored_start";
+
+export type FocusNowLimits = {
+    sharpness: number,
+    max_seconds: number,
+    max_passes: number,
+    centre_zones: number,
+    retry_zones: number,
+    retry_first: boolean,
+};
+
+export type FocusNowOutcome = "focused" | "approximate" | "scene_changed" | "low_texture" | "no_peak" | "reader_missing" | "command_lost" | "focus_moved" | "stopped" | "not_available";
+
+export type FocusNowPhase = "coarse" | "fine" | "land";
+
+export type FocusNowResult = {
+    outcome: FocusNowOutcome,
+    message: string,
+    finished_at: string,
+    seconds: number,
+    ratio: number | null,
+    focus: number | null,
+    sharpness: number | null,
+    fallback: FocusNowFallback | null,
+};
+
+export type FocusNowStatus = {
+    reader_running: boolean,
+    running: boolean,
+    phase: FocusNowPhase | null,
+    last: FocusNowResult | null,
+    limits: FocusNowLimits,
+    continuous: boolean,
+    watching: boolean,
+};
 
 export type FullGain = "full";
 
