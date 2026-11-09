@@ -201,6 +201,22 @@
         label-width="130px"
         @update:model-value="send({ focus: $event as number })"
       />
+      <!-- Focus now searches the whole focus range on the camera's own AF statistics. -->
+      <div
+        v-if="capabilities?.focus && pro?.focus != null"
+        class="readout mb-2"
+      >
+        <span class="readout-label" />
+        <BlueButton
+          :disabled="controlsDisabled"
+          density="compact"
+          theme="dark"
+          @click="focusNow?.running ? stopFocusNow() : startFocusNow()"
+        >
+          {{ focusNow?.running ? 'Stop' : 'Focus now' }}
+        </BlueButton>
+        <span class="readout-value">{{ focusNowText }}</span>
+      </div>
       <BlueSlider
         v-if="capabilities?.zoom && pro?.zoom != null"
         :model-value="pro.zoom"
@@ -362,6 +378,8 @@ import {
 import type {
   CameraStateEvent,
   ExposureMode,
+  FocusNowPhase,
+  FocusNowStatus,
   MaxIso,
   OnePushAwbStatus,
   ProCapabilities,
@@ -428,7 +446,14 @@ const SCENE_LABELS: Record<WhiteBalanceScene, string> = {
   blue_water: 'Blue',
 }
 
+const FOCUS_NOW_PHASES: Record<FocusNowPhase, string> = {
+  coarse: 'Searching the focus range...',
+  fine: 'Placing the sharpest focus...',
+  land: 'Moving there...',
+}
+
 const pro = ref<ProState | null>(null)
+const focusNow = ref<FocusNowStatus | null>(null)
 const capabilities = ref<ProCapabilities | null>(null)
 // Only Exposure opens by default: the tab often sits in a narrow panel beside the video.
 // Which panels are open is remembered on this browser.
@@ -773,6 +798,52 @@ const doOnePush = () => {
   })
 }
 
+const focusNowText = computed(() => {
+  const status = focusNow.value
+  if (!status) return ''
+  if (status.running) return status.phase ? FOCUS_NOW_PHASES[status.phase] : 'Starting...'
+  if (!status.reader_running) return "No AF statistics from the camera: its reader isn't running"
+  const last = status.last
+  if (!last) return ''
+  const ratio = last.ratio != null ? ` (${Math.round(last.ratio * 100)} % of the peak)` : ''
+  return `${last.message}${ratio}`
+})
+
+const loadFocusNow = async (uuid: string) => {
+  try {
+    const status = await backendClient.request<FocusNowStatus>('GET', path(uuid, '/focus_now'))
+    if (uuid === props.selectedCameraUuid) focusNow.value = status
+  } catch (error) {
+    console.error('Error reading Focus now:', error)
+  }
+}
+
+const startFocusNow = () => {
+  const uuid = props.selectedCameraUuid
+  if (!uuid || controlsDisabled.value) return
+  backendClient
+    .request<FocusNowStatus>('POST', path(uuid, '/focus_now'))
+    .then((status) => {
+      if (uuid === props.selectedCameraUuid) focusNow.value = status
+    })
+    .catch((error) => {
+      console.error('Error starting Focus now:', error)
+      emit('error', `Focus now did not start: ${formatRequestError(error)}`)
+      void loadFocusNow(uuid)
+    })
+}
+
+const stopFocusNow = () => {
+  const uuid = props.selectedCameraUuid
+  if (!uuid) return
+  backendClient
+    .request<FocusNowStatus>('POST', path(uuid, '/focus_now/stop'))
+    .then((status) => {
+      if (uuid === props.selectedCameraUuid) focusNow.value = status
+    })
+    .catch((error) => console.error('Error stopping Focus now:', error))
+}
+
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let refreshCapabilities = false
 
@@ -804,6 +875,7 @@ watch(
   (uuid) => {
     pro.value = null
     capabilities.value = null
+    focusNow.value = null
     exposureWarning.value = lastWarning = null
     if (uuid) void load(uuid, true)
   },
@@ -817,9 +889,16 @@ const liveTimer = setInterval(() => {
   if (uuid && pro.value && pro.value.mode !== 'manual' && !inFlight) void load(uuid, false)
 }, 1000)
 
+// Focus now runs in the backend: follow its status while the lens can focus.
+const focusNowTimer = setInterval(() => {
+  const uuid = props.selectedCameraUuid
+  if (uuid && capabilities.value?.focus) void loadFocusNow(uuid)
+}, 500)
+
 onUnmounted(() => {
   if (refreshTimer) clearTimeout(refreshTimer)
   clearInterval(liveTimer)
+  clearInterval(focusNowTimer)
 })
 </script>
 
