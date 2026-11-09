@@ -201,6 +201,13 @@ fn generate_typescript_bindings_for_br4kcam_api() -> Result<()> {
         br4kcam_api::pro::ProState::export_to_string()?,
         br4kcam_api::pro::ProSettings::export_to_string()?,
         br4kcam_api::pro::ProCapabilities::export_to_string()?,
+        br4kcam_api::pro::FocusNowOutcome::export_to_string()?,
+        br4kcam_api::pro::FocusNowPhase::export_to_string()?,
+        br4kcam_api::pro::FocusNowResult::export_to_string()?,
+        br4kcam_api::pro::FocusNowStatus::export_to_string()?,
+        br4kcam_api::pro::FocusNowLimits::export_to_string()?,
+        br4kcam_api::pro::FocusNowContinuous::export_to_string()?,
+        br4kcam_api::pro::FocusNowFallback::export_to_string()?,
     ]
     .join("\n\n");
 
