@@ -2176,4 +2176,26 @@ mod tests {
         sim.reader_stops = 2.0;
         assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::ReaderMissing));
     }
+
+    #[tokio::test]
+    async fn takes_no_lens_at_rest_for_a_peak() {
+        // `reports/isp-af-r2.md`: at zoom 1.7 a weak peak, blurred by the full-speed pass,
+        // spiked under what the lens saw resting at the window's end. The pass took the end
+        // for the peak, the ramp there saw no hump, and the landing at its flat top reported
+        // focused 75 µs off.
+        for seed in 10..14 {
+            let mut sim = Sim::new(seed, 1100.0, 1296.0);
+            sim.height = 25.0;
+            sim.low_end = 40.0;
+            let landed = focus(&mut sim).await;
+            sim.wait(0.6).await.unwrap();
+            if let Ok(landing) = landed {
+                assert!(
+                    sim.error().abs() < 4.0,
+                    "{seed}: {landing:?} {}",
+                    sim.error()
+                );
+            }
+        }
+    }
 }
