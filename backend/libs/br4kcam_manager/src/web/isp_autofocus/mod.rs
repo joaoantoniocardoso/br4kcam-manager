@@ -123,6 +123,57 @@ fn learn(camera_uuid: Uuid, landing: &Landing) {
     }
 }
 
+/// Takes the camera's learned biases from the settings, where they outlive a restart and a
+/// settings reset clears them.
+async fn load_learned(camera_uuid: Uuid) {
+    let Some(manager) = settings::MANAGER.get() else {
+        return;
+    };
+    let saved = manager
+        .write()
+        .await
+        .settings
+        .get_focus_now_learned_mut()
+        .get(&camera_uuid)
+        .cloned()
+        .unwrap_or_default();
+    BIASES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            camera_uuid,
+            [saved.falling.into(), saved.rising.into(), saved.ramp.into()],
+        );
+}
+
+/// Saves the camera's learned biases in the settings.
+async fn save_learned(camera_uuid: Uuid) {
+    let Some(manager) = settings::MANAGER.get() else {
+        return;
+    };
+    let Some([falling, rising, ramp]) = BIASES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&camera_uuid)
+        .cloned()
+    else {
+        return;
+    };
+    let stored = &mut manager.write().await.settings;
+    stored.get_focus_now_learned_mut().insert(
+        camera_uuid,
+        settings::FocusNowLearned {
+            falling: falling.into(),
+            rising: rising.into(),
+            ramp: ramp.into(),
+        },
+    );
+    // A failed save shows in the health report; the biases still hold until a restart.
+    if let Err(error) = stored.save().await {
+        warn!("Failed saving the Focus now biases: {error:?}");
+    }
+}
+
 fn median(values: &VecDeque<f64>) -> Option<f64> {
     let mut sorted: Vec<f64> = values.iter().copied().collect();
     sorted.sort_by(f64::total_cmp);
@@ -380,6 +431,7 @@ fn command_sender(camera_uuid: Uuid) -> (mpsc::UnboundedSender<u16>, Arc<AtomicB
 async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
     let started = Instant::now();
     let camera_uuid = env.camera_uuid;
+    load_learned(camera_uuid).await;
     let k = constants(camera_uuid);
     info!(
         "Focus now of {camera_uuid}: coarse biases F {:.1} R {:.1}, ramp bias {:.2} ({}), limits {limits:?}",
@@ -412,6 +464,7 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
                 // Only a certified landing is the truth the passes' biases are measured against.
                 if landing.certified {
                     learn(camera_uuid, &landing);
+                    save_learned(camera_uuid).await;
                 }
                 // The script's input takes the landing, so the focus slider shows it and the
                 // zoom correlation keeps it; its output is the one landed on.
