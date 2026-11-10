@@ -50,6 +50,8 @@ struct Camera {
     frames: VecDeque<Frame>,
     /// Receive time less pts of each kept frame, s.
     delays: VecDeque<f64>,
+    /// The pts and receive time of each kept frame, s.
+    received: VecDeque<(f64, f64)>,
     /// Until when its statistics are wanted.
     wanted_until: Option<Instant>,
     /// The side of its centre window, in zones, when not [`CENTRE`].
@@ -204,6 +206,7 @@ fn receive(address: Ipv4Addr, at: Instant, pts: u64, v2: f64, v1: f64, wide: Opt
     let mut cameras = cameras();
     let camera = cameras.entry(address).or_default();
     camera.delays.push_back(seconds(at) - pts);
+    camera.received.push_back((pts, seconds(at)));
     let offset = camera
         .delays
         .iter()
@@ -226,10 +229,37 @@ fn receive(address: Ipv4Addr, at: Instant, pts: u64, v2: f64, v1: f64, wide: Opt
     if camera.frames.len() > KEEP {
         camera.frames.pop_front();
         camera.delays.pop_front();
+        camera.received.pop_front();
     }
     if camera.wide.len() > KEEP {
         camera.wide.pop_front();
     }
+}
+
+/// The camera's frame time less pts, s: the frames' `t` is their pts plus it.
+pub(crate) fn offset(address: Ipv4Addr) -> Option<f64> {
+    let cameras = cameras();
+    let camera = cameras.get(&address)?;
+    let offset = camera
+        .delays
+        .iter()
+        .rev()
+        .take(ALIGN)
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    offset.is_finite().then_some(offset)
+}
+
+/// The pts and receive time, s, of the frames of the camera at `address` received from `t0` on,
+/// oldest first.
+pub(crate) fn received(address: Ipv4Addr, t0: f64) -> Vec<(f64, f64)> {
+    cameras()
+        .get(&address)
+        .map(|camera| {
+            let received = camera.received.iter().filter(|&&(_, at)| t0 <= at);
+            received.copied().collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The frames of the camera at `address` with `t0 <= t < t1`, oldest first.
