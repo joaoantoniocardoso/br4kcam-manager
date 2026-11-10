@@ -2831,4 +2831,38 @@ mod tests {
         }
         assert!(stopped > 0, "never stopped on a reading's upper bound");
     }
+
+    #[tokio::test]
+    async fn falls_back_within_the_time_limit() {
+        // Runs that fail late (live on t9c, the night of 2026-11-10: fall-backs ended at up to
+        // 17.8 s on a 9 s limit; here at 11.8 to 16.4 s without one): the fall-back reads what
+        // fits the limit and no more. The run ends within it and one move (the search's own last
+        // reading may run over, as in `certifies_only_the_sharpness_it_reaches`).
+        let mut failed = 0;
+        for (seed, blank_after) in [(8, 2.0), (9, 3.0), (10, 4.0), (11, 5.5), (12, 7.0)] {
+            let mut sim = Sim::new(seed, 1100.0, 981.0);
+            sim.blank_after = blank_after;
+            sim.wait(0.5).await.unwrap();
+            let t0 = sim.now();
+            let limits = FocusNowLimits::default();
+            if run(&mut sim, &MODEL, &limits).await.is_ok() {
+                continue;
+            }
+            failed += 1;
+            let best = sim
+                .notes
+                .iter()
+                .rev()
+                .find(|(_, v2)| v2.is_none())
+                .map(|&(u, _)| u);
+            let until = t0 + f64::from(limits.max_seconds);
+            let fell = fall_back(&mut sim, &MODEL, &limits, best, 981.0, until, None).await;
+            assert!(
+                sim.now() <= until + 1.0,
+                "blank after {blank_after}: ended at {:.2} s, {fell:?}",
+                sim.now() - t0
+            );
+        }
+        assert!(failed >= 3, "{failed} failed runs");
+    }
 }
