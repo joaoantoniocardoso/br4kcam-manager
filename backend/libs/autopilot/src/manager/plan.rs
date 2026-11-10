@@ -1167,6 +1167,42 @@ mod tests {
     }
 
     #[test]
+    fn channel_functions_are_written_without_a_reboot() {
+        // Sub sets the functions up again every second: a drifted one is written back live,
+        // and so are the channels a role moves to and leaves.
+        let snapshot = set_up(empty(), CAMERA);
+        let saved = snapshot.saved[&CAMERA].clone();
+        let functions = [
+            "SERVO10_FUNCTION",
+            "SERVO11_FUNCTION",
+            "SERVO12_FUNCTION",
+            "SERVO16_FUNCTION",
+        ];
+        let drifted = functions
+            .into_iter()
+            .fold(snapshot.clone(), |snapshot, name| {
+                holding(snapshot, name, ParamType::INT16(1))
+            });
+        let plan = plan_apply(&drifted, CAMERA, &config_for(&saved), false).unwrap();
+        for name in functions {
+            assert!(names(&plan.writes).contains(&name), "{name} is not written");
+        }
+        assert!(!plan.reboot);
+
+        let config = parameters(api::ActuatorsParametersConfig {
+            tilt_channel: Some(api::ServoChannel::SERVO14),
+            ..Default::default()
+        });
+        let plan = plan_apply(&snapshot, CAMERA, &config, false).unwrap();
+        assert_eq!(written_value(&plan.writes, "SERVO14_FUNCTION"), Some(7.0));
+        assert_eq!(names(&plan.releases), ["SERVO16_FUNCTION"]);
+        assert!(!plan.reboot);
+
+        assert!(!takes_reboot("SERVO16_FUNCTION"));
+        assert!(takes_reboot("CAM1_TYPE") && takes_reboot("MNT1_TYPE"));
+    }
+
+    #[test]
     fn forgetting_a_camera_releases_only_what_it_still_holds() {
         let snapshot = holding(
             set_up(empty(), CAMERA),
