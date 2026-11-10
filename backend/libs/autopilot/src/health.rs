@@ -1130,8 +1130,8 @@ mod tests {
         let camera_uuid = Uuid::from_u128(0xd11f_0000_0000_0001);
         let actuators = ActuatorsParameters::default();
         let param_name = format!("SERVO{}_FUNCTION", actuators.focus_channel as u8);
-        let expected_function = ParamType::INT16(ChannelFunction::Script1 as i16);
-        let drifted_function = ParamType::INT16(ChannelFunction::Disabled as i16);
+        let expected_function = ParamType::INT16(ChannelFunction::Disabled as i16);
+        let drifted_function = ParamType::INT16(ChannelFunction::Script1 as i16);
 
         crate::manager::owned_parameters::install_expectations_for_test(camera_uuid, &actuators);
         let mut cache = IndexMap::new();
@@ -1159,8 +1159,8 @@ mod tests {
         let drifts = parameter_drifts();
         assert_eq!(drifts.len(), 1);
         assert_eq!(drifts[0].name, param_name);
-        assert_eq!(drifts[0].expected, ChannelFunction::Script1 as i16 as f32);
-        assert_eq!(drifts[0].actual, ChannelFunction::Disabled as i16 as f32);
+        assert_eq!(drifts[0].expected, ChannelFunction::Disabled as i16 as f32);
+        assert_eq!(drifts[0].actual, ChannelFunction::Script1 as i16 as f32);
 
         observe_param_value_from_sync(
             &Parameter {

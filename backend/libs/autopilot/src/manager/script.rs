@@ -52,7 +52,7 @@ pub(crate) const SCRIPT_STUCK_FAILURE: &str =
 
 // Independent of `CARGO_PKG_VERSION`. Bump only when the template or generation logic
 // changes. Health compares script bodies and ignores the `--- Version:` header line.
-pub const LUA_SCRIPT_VERSION: &str = "2.0.0";
+pub const LUA_SCRIPT_VERSION: &str = "2.1.0";
 
 impl Manager {
     #[instrument(level = "debug")]
@@ -535,12 +535,12 @@ struct LuaCamera {
     param_table_key: u8,
     param_prefix: String,
     margin_gain: f32,
-    k_focus: i16,
+    /// The focus servo's channel, from 0, which the script drives by its number.
+    focus_ch: u8,
     k_zoom: i16,
     k_focus_input: i16,
     k_script: i16,
     script_function_name: String,
-    focus_name: String,
     zoom_name: String,
     focus_input_name: String,
     closest_points: String,
@@ -579,8 +579,7 @@ fn generate_lua_script(cameras: &[&CameraActuators]) -> Result<String> {
         .map(|camera| {
             let parameters = &camera.parameters;
             let id = parameters.camera_id as u8;
-            let (focus, zoom, input) = (
-                parameters.focus_function(Setup::PerCamera),
+            let (zoom, input) = (
                 parameters.zoom_function(Setup::PerCamera),
                 parameters.focus_input_function(Setup::PerCamera),
             );
@@ -589,14 +588,13 @@ fn generate_lua_script(cameras: &[&CameraActuators]) -> Result<String> {
                 param_table_key: PARAM_TABLE_KEY_BASE + id,
                 param_prefix: format!("\"{PARAM_PREFIX}{id}_\""),
                 margin_gain: parameters.focus_margin_gain,
-                k_focus: focus as i16,
+                focus_ch: parameters.focus_channel as u8 - 1,
                 k_zoom: zoom as i16,
                 k_focus_input: input as i16,
                 k_script: parameters.focus_function(Setup::Shared) as i16,
                 script_function_name: script_function_name(
                     parameters.focus_function(Setup::Shared),
                 ),
-                focus_name: script_function_name(focus),
                 zoom_name: script_function_name(zoom),
                 focus_input_name: script_function_name(input),
                 closest_points: camera.closest_points.to_lua(),
@@ -768,8 +766,9 @@ mod tests {
         assert!(contents.contains("script_function_name = \"Script1\""));
         assert!(contents.contains("SRV_Channels:set_output_pwm(camera.k_script, script_trim)"));
         assert!(contents.contains("servo function not found"));
-        // The camera's own Script functions: Script1 focus, Script2 zoom, Script3 focus input.
-        assert!(contents.contains("k_focus = 94,"));
+        // The focus output by its channel (SERVO10), the camera's own Script functions: Script2
+        // zoom, Script3 focus input.
+        assert!(contents.contains("focus_ch = 9,"));
         assert!(contents.contains("k_zoom = 95,"));
         assert!(contents.contains("k_focus_input = 96,"));
     }
@@ -793,7 +792,7 @@ mod tests {
         assert_eq!(contents.matches("param_table_key =").count(), 2);
         assert!(contents.contains("param_prefix = \"BR4KCAM1_\""));
         assert!(contents.contains("param_prefix = \"BR4KCAM2_\""));
-        assert!(contents.contains("k_focus = 97,"));
+        assert!(contents.contains("focus_ch = 6,"));
         assert!(contents.contains("k_zoom = 98,"));
         assert!(contents.contains("k_focus_input = 99,"));
         // The order of the cameras does not change the script, so health does not flag it.
@@ -827,6 +826,8 @@ mod tests {
     /// of the instance `i` (camera id - 1), `NOW` the time in ms.
     const AUTOPILOT: &str = r#"
         OUT, SCALED, CHANNELS, PARAMS, STATES, TEXTS, NOW = {}, {}, {}, {}, {}, {}, 0
+        -- Outputs by channel (from 0), and how long the script's override of each lasts.
+        OUT_CH, OVERRIDE_UNTIL = {}, {}
         -- The functions written in the current run: one written twice is the script fighting
         -- itself, which fails the run.
         WRITTEN = {}
@@ -844,6 +845,11 @@ mod tests {
             end,
             -- Only a function on a channel has an output.
             get_output_pwm = function(_, f) if CHANNELS[f] then return OUT[f] end end,
+            set_output_pwm_chan_timeout = function(_, ch, v, ms)
+                OUT_CH[ch] = v
+                OVERRIDE_UNTIL[ch] = NOW + ms
+            end,
+            get_output_pwm_chan = function(_, ch) return OUT_CH[ch] end,
             -- Scaled 0 to 1000 over the servo's MIN to MAX, read back as its PWM.
             set_output_scaled = function(_, f, v)
                 SCALED[f] = v
@@ -1040,10 +1046,13 @@ mod tests {
                 parameters.focus_input_function(*setup),
             ]
             .map(|function| {
-                self.lua
-                    .load(format!("return OUT[{}]", function as i16))
-                    .eval()
-                    .unwrap()
+                // The per-camera setup's focus output is on no function: read by its channel.
+                let output = if function == ChannelFunction::Disabled {
+                    format!("OUT_CH[{}]", parameters.focus_channel as u8 - 1)
+                } else {
+                    format!("OUT[{}]", function as i16)
+                };
+                self.lua.load(format!("return {output}")).eval().unwrap()
             })
         }
 

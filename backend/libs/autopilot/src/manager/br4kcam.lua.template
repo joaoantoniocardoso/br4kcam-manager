@@ -8,7 +8,8 @@
 -- Usage: change the output controlling focus from CameraFocus to the camera's script function
 --        but assign CameraFocus to any other "Disabled" channel as we need to read it, as it allows fine-tuning
 -- A Scripting camera (CAMn_TYPE 7, ArduSub 4.8+) reads its zoom and focus from its own camera
--- state instead, and this script also drives its zoom and focus input outputs.
+-- state instead, and this script also drives its zoom and focus input outputs. Its focus output
+-- is on no function ("Disabled"): the script drives it by its channel.
 
 -- ArduPilot's camera library (the cameras below are also called `camera`)
 local ap_camera = camera
@@ -24,10 +25,9 @@ local CAMERAS = {
         margin_gain = {{ camera.margin_gain }},
         k_script = {{ camera.k_script }},
         script_function_name = "{{ camera.script_function_name }}",
-        k_focus = {{ camera.k_focus }},
+        focus_ch = {{ camera.focus_ch }},
         k_zoom = {{ camera.k_zoom }},
         k_focus_input = {{ camera.k_focus_input }},
-        focus_name = "{{ camera.focus_name }}",
         zoom_name = "{{ camera.zoom_name }}",
         focus_input_name = "{{ camera.focus_input_name }}",
         -- Lookup tables for closest and furthest focus points
@@ -104,6 +104,8 @@ end
 local function is_scripting_camera(camera)
     return param:get("CAM" .. camera.id .. "_TYPE") == SCRIPTING_CAMERA_TYPE
 end
+
+local TICK_MS = 100
 
 -- Function to set focus and zoom to trim level
 local function set_zoom_focus_to_trim(camera)
@@ -203,8 +205,7 @@ end
 local function update_scripting_camera(camera, dt)
     local zoom_range = find_servo_range(camera.k_zoom, camera.zoom_name, camera.missing_script_warned)
     local input_range = find_servo_range(camera.k_focus_input, camera.focus_input_name, camera.missing_script_warned)
-    if zoom_range == nil or input_range == nil
-        or find_servo_function(camera.k_focus, camera.focus_name, camera.missing_script_warned) == nil then
+    if zoom_range == nil or input_range == nil then
         return
     end
     camera.zoom_input = camera.zoom_input or current_pwm(camera.k_zoom, zoom_range)
@@ -237,7 +238,9 @@ local function update_scripting_camera(camera, dt)
 
     SRV_Channels:set_output_pwm(camera.k_zoom, zoom_input)
     SRV_Channels:set_output_pwm(camera.k_focus_input, focus_input)
-    SRV_Channels:set_output_pwm(camera.k_focus, focus_output)
+    -- Forced, so a DO_SET_SERVO from anyone has no effect until the next run renews it; it
+    -- outlasts a late run, where the output keeps its last value anyway.
+    SRV_Channels:set_output_pwm_chan_timeout(camera.focus_ch, focus_output, 2 * TICK_MS + 50)
 end
 
 -- A Servo camera: its zoom and focus come from ArduPilot's one CameraZoom and CameraFocus.
@@ -307,7 +310,7 @@ function update()
     for _, camera in ipairs(CAMERAS) do
         scripting[camera] = is_scripting_camera(camera)
         if scripting[camera] then
-            written[camera.k_focus], written[camera.k_zoom], written[camera.k_focus_input] = true, true, true
+            written[camera.k_zoom], written[camera.k_focus_input] = true, true
         end
     end
 
@@ -319,7 +322,7 @@ function update()
         end
     end
 
-    return update, 100
+    return update, TICK_MS
 end
 
 return start, 1000

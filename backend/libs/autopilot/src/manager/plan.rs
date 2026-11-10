@@ -782,11 +782,10 @@ mod tests {
         let mut functions = Vec::new();
         for uuid in [CAMERA, OTHER] {
             let parameters = &snapshot.saved[&uuid].parameters;
-            for channel in [
-                parameters.focus_channel,
-                parameters.zoom_channel,
-                parameters.script_channel,
-            ] {
+            // The focus servo is on no function: the script drives it by its channel.
+            let focus = servo_param(parameters.focus_channel, "FUNCTION");
+            assert_eq!(held(&snapshot, &focus), Some(0.0));
+            for channel in [parameters.zoom_channel, parameters.script_channel] {
                 let name = servo_param(channel, "FUNCTION");
                 functions.push(held(&snapshot, &name).unwrap() as i16);
             }
@@ -829,7 +828,6 @@ mod tests {
             released,
             [
                 "CAM1_TYPE",
-                "SERVO10_FUNCTION",
                 "SERVO11_FUNCTION",
                 "SERVO12_FUNCTION",
                 "SERVO16_FUNCTION"
@@ -958,7 +956,7 @@ mod tests {
     #[test]
     fn a_role_moves_onto_a_channel_already_holding_it() {
         let mut snapshot = set_up(empty(), CAMERA);
-        let function = owned(&snapshot.saved[&CAMERA].parameters)["SERVO10_FUNCTION"];
+        let function = owned(&snapshot.saved[&CAMERA].parameters)["SERVO11_FUNCTION"];
         snapshot.autopilot.insert(
             "SERVO13_FUNCTION".to_string(),
             Parameter {
@@ -967,16 +965,16 @@ mod tests {
             },
         );
         let config = parameters(api::ActuatorsParametersConfig {
-            focus_channel: Some(api::ServoChannel::SERVO13),
+            zoom_channel: Some(api::ServoChannel::SERVO13),
             ..Default::default()
         });
         let plan = plan_apply(&snapshot, CAMERA, &config, false).unwrap();
 
         assert_eq!(
-            plan.next.parameters.focus_channel,
+            plan.next.parameters.zoom_channel,
             api::ServoChannel::SERVO13
         );
-        assert!(names(&plan.releases).contains(&"SERVO10_FUNCTION"));
+        assert!(names(&plan.releases).contains(&"SERVO11_FUNCTION"));
         let names = names(&plan.writes);
         assert!(names.contains(&"SERVO13_MIN"));
     }
@@ -1101,12 +1099,10 @@ mod tests {
             assert!(names.contains(&name), "{name} is not written");
         }
         assert_eq!(written_value(&plan.releases, "CAM1_TYPE"), Some(0.0));
-        // The Script functions follow the camera id: CAM2 owns Script4 to Script6.
-        for (name, function) in [
-            ("SERVO10_FUNCTION", 97.0),
-            ("SERVO11_FUNCTION", 98.0),
-            ("SERVO12_FUNCTION", 99.0),
-        ] {
+        // The Script functions follow the camera id: CAM2 owns Script4 to Script6, its focus
+        // servo none.
+        assert_eq!(written_value(&plan.writes, "SERVO10_FUNCTION"), None);
+        for (name, function) in [("SERVO11_FUNCTION", 98.0), ("SERVO12_FUNCTION", 99.0)] {
             assert_eq!(written_value(&plan.writes, name), Some(function), "{name}");
         }
         assert!(plan.reboot);
@@ -1254,15 +1250,7 @@ mod tests {
 
         let mut names = names(&writes);
         names.sort_unstable();
-        assert_eq!(
-            names,
-            [
-                "CAM1_TYPE",
-                "SERVO10_FUNCTION",
-                "SERVO12_FUNCTION",
-                "SERVO16_FUNCTION"
-            ]
-        );
+        assert_eq!(names, ["CAM1_TYPE", "SERVO12_FUNCTION", "SERVO16_FUNCTION"]);
         assert!(plan_forget(&snapshot, OTHER).unwrap().is_none());
     }
 
@@ -1319,12 +1307,7 @@ mod tests {
 
         assert_eq!(
             sorted(names(&plan.releases)),
-            [
-                "CAM1_TYPE",
-                "SERVO10_FUNCTION",
-                "SERVO11_FUNCTION",
-                "SERVO12_FUNCTION"
-            ]
+            ["CAM1_TYPE", "SERVO11_FUNCTION", "SERVO12_FUNCTION"]
         );
         assert!(plan.writes.is_empty(), "{:?}", names(&plan.writes));
         assert_eq!(plan.script, ScriptAction::Delete);
@@ -1339,7 +1322,6 @@ mod tests {
             description,
             [
                 "CAM1_TYPE: 7 → 0",
-                "SERVO10_FUNCTION: 94 → 0",
                 "SERVO11_FUNCTION: 95 → 0",
                 "SERVO12_FUNCTION: 96 → 0",
             ]
@@ -1510,7 +1492,7 @@ mod tests {
 
         assert_eq!(
             sorted(names(&plan.releases)),
-            ["CAM1_TYPE", "SERVO10_FUNCTION", "SERVO12_FUNCTION"]
+            ["CAM1_TYPE", "SERVO12_FUNCTION"]
         );
     }
 
@@ -1596,12 +1578,7 @@ mod tests {
 
         assert_eq!(
             sorted(names(&plan.releases)),
-            [
-                "CAM1_TYPE",
-                "SERVO10_FUNCTION",
-                "SERVO11_FUNCTION",
-                "SERVO12_FUNCTION"
-            ]
+            ["CAM1_TYPE", "SERVO11_FUNCTION", "SERVO12_FUNCTION"]
         );
         assert_eq!(plan.script, ScriptAction::Delete);
         assert!(!names(&plan.writes).contains(&"SCR_ENABLE"));
@@ -1806,12 +1783,12 @@ mod tests {
     const ORIGIN_MASTER_TRANSCRIPT: &str = r"## first camera
 writes: CAM1_TYPE=1! SERVO12_FUNCTION=92! SERVO12_REVERSED=0 SERVO12_MIN=870! SERVO12_TRIM=1500! SERVO12_MAX=2130! SERVO10_FUNCTION=94! SERVO10_REVERSED=0 SERVO10_MIN=870! SERVO10_TRIM=918! SERVO10_MAX=2130! SERVO11_FUNCTION=180! SERVO11_REVERSED=0 SERVO11_MIN=935! SERVO11_TRIM=935! SERVO11_MAX=1850! SERVO16_FUNCTION=7! SERVO16_MIN=865! SERVO16_TRIM=1500! SERVO16_MAX=2250! SERVO16_REVERSED=0! MNT1_TYPE=7! MNT1_PITCH_MIN=-70! MNT1_PITCH_MAX=70! SCR_ENABLE=1!
 releases: 
-script: write 6a79367e304dfee3 reload: false reboot: true
+script: write 4ff0cdc2bf461c73 reload: false reboot: true
 after_reload: 
 ## second camera
 writes: CAM2_TYPE=1! SERVO9_FUNCTION=92! SERVO9_REVERSED=0 SERVO9_MIN=870! SERVO9_TRIM=1500! SERVO9_MAX=2130! SERVO7_FUNCTION=94! SERVO7_REVERSED=0 SERVO7_MIN=870! SERVO7_TRIM=918! SERVO7_MAX=2130! SERVO8_FUNCTION=180! SERVO8_REVERSED=0 SERVO8_MIN=935! SERVO8_TRIM=935! SERVO8_MAX=1850! SERVO15_FUNCTION=13! SERVO15_MIN=865! SERVO15_TRIM=1500! SERVO15_MAX=2250! SERVO15_REVERSED=0! MNT2_TYPE=7! MNT2_PITCH_MIN=-70! MNT2_PITCH_MAX=70! SCR_ENABLE=1!
 releases: 
-script: write 825372c43dc3a241 reload: false reboot: true
+script: write eae35c4a246e6f17 reload: false reboot: true
 after_reload: 
 ## first camera again
 writes: 
@@ -1821,16 +1798,16 @@ after_reload:
 ## second camera fixed
 writes: 
 releases: CAM2_TYPE=0 SERVO9_FUNCTION=0 SERVO7_FUNCTION=0 SERVO8_FUNCTION=0
-script: write 6a79367e304dfee3 reload: false reboot: true
+script: write 4ff0cdc2bf461c73 reload: false reboot: true
 after_reload: 
 ## first camera script function
 writes: SERVO10_FUNCTION=98 SERVO10_MIN=870! SERVO10_TRIM=918! SERVO10_MAX=2130!
 releases: 
-script: write 11011dbf183d4799 reload: true reboot: false
+script: write 83cbf9148ed7e5df reload: true reboot: false
 after_reload: BR4KCAM1_ENABLE=1! BR4KCAM1_GAIN=1!
 ## forget first
 releases: CAM1_TYPE=0 SERVO12_FUNCTION=0 SERVO10_FUNCTION=0 SERVO11_FUNCTION=0 SERVO16_FUNCTION=0
-script: write 44fd81db30075ae4
+script: write 53719e95cfbbb6ef
 ## owned 00000000-0000-0000-0000-0000091a0001
 BR4KCAM1_ENABLE=1 BR4KCAM1_GAIN=1 CAM1_TYPE=1 MNT1_PITCH_MAX=70 MNT1_PITCH_MIN=-70 MNT1_TYPE=7 SERVO10_FUNCTION=94 SERVO11_FUNCTION=180 SERVO12_FUNCTION=92 SERVO16_FUNCTION=7 SERVO16_REVERSED=0
 ## owned 00000000-0000-0000-0000-0000091a0002
@@ -1899,7 +1876,7 @@ BR4KCAM1_ENABLE=1 BR4KCAM1_GAIN=1 BR4KCAM2_ENABLE=1 BR4KCAM2_GAIN=1 CAM1_TYPE=1 
 
         // Each camera then owns its per-camera functions and type, which the autopilot does
         // not hold yet: what drifts, and what re-applying writes.
-        for (uuid, functions) in [(CAMERA, [94.0, 95.0, 96.0]), (OTHER, [97.0, 98.0, 99.0])] {
+        for (uuid, functions) in [(CAMERA, [0.0, 95.0, 96.0]), (OTHER, [0.0, 98.0, 99.0])] {
             let parameters = &updated.saved[&uuid].parameters;
             let id = parameters.camera_id as u8;
             let owned = owned(parameters);

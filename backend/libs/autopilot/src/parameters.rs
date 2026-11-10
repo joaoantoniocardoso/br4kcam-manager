@@ -278,12 +278,14 @@ impl ActuatorsParameters {
         ChannelFunction::try_from(function).expect("camera ids 1 and 2 own Script1 to Script6")
     }
 
-    /// The function of the focus servo, which the Lua script drives.
+    /// The function of the focus servo. The shared setup's Lua script drives it by its function;
+    /// the per-camera one drives it by its channel, so it is free ("Disabled") and Focus now can
+    /// drive it straight with DO_SET_SERVO while the script hands it over.
     pub fn focus_function(&self, setup: Setup) -> ChannelFunction {
         match setup {
             Setup::Shared => ChannelFunction::try_from(self.script_function as u8 as i16)
                 .expect("every script function is a Script channel function"),
-            Setup::PerCamera => self.script_function_at(0),
+            Setup::PerCamera => ChannelFunction::Disabled,
         }
     }
 
