@@ -226,3 +226,26 @@ pub(crate) fn frames(address: Ipv4Addr, t0: f64, t1: f64) -> Vec<Frame> {
         })
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measures_the_centre_on_its_window() {
+        let mut packet = vec![0u8; PACKET_LEN];
+        packet[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        packet[16..24].copy_from_slice(&5_000_000u64.to_le_bytes());
+        let mut set = |row: usize, column: usize, field: usize, value: u16| {
+            let at = HEADER_LEN + ((row * ZONE_COLUMNS + column) * ZONE_FIELDS + field) * 2;
+            packet[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        };
+        // v2 only on the middle zone, v1 only on the top left corner.
+        set(7, 8, V2, 9);
+        set(0, 0, V1, 255);
+        assert_eq!(parse(&packet, 1), Some((5_000_000, 9.0, 0.0)));
+        assert_eq!(parse(&packet, 3), Some((5_000_000, 1.0, 0.0)));
+        assert_eq!(parse(&packet, 17), Some((5_000_000, 9.0 / 255.0, 1.0)));
+        assert_eq!(parse(&packet[1..], 3), None);
+    }
+}
