@@ -9,7 +9,8 @@
 --        but assign CameraFocus to any other "Disabled" channel as we need to read it, as it allows fine-tuning
 -- A Scripting camera (CAMn_TYPE 7, ArduSub 4.8+) reads its zoom and focus from its own camera
 -- state instead, and this script also drives its zoom and focus input outputs. Its focus output
--- is on no function ("Disabled"): the script drives it by its channel.
+-- is on no function ("Disabled"): the script drives it by its channel, and hands it over to the
+-- manager's Focus now on a lease (below).
 
 -- ArduPilot's camera library (the cameras below are also called `camera`)
 local ap_camera = camera
@@ -105,7 +106,56 @@ local function is_scripting_camera(camera)
     return param:get("CAM" .. camera.id .. "_TYPE") == SCRIPTING_CAMERA_TYPE
 end
 
+-- Focus now lease: COMMAND_LONG MAV_CMD_USER_1 to the autopilot, for the camera with that id.
+--   param1 camera id, param2 mode (1 hold, which also renews it; 0 release), param4 lease ms.
+-- While it is held the script does not write the camera's focus output, and the manager drives
+-- it with DO_SET_SERVO. Otherwise the script holds the output with an override, so a
+-- DO_SET_SERVO from anyone has no effect (it is still ACKed ACCEPTED).
+-- The lease ends on a release or when it is not renewed in time (the manager is gone): the
+-- focus stays where it was left, the input taking the value that gives it until the camera's
+-- focus is commanded again. The user commanding the focus or the zoom ends it at once and their
+-- command wins; holds are then DENIED until a release.
+-- COMMAND_ACK: result ACCEPTED (0) or DENIED (2); result_param2 = focus output | (zoom << 16).
+local MAV_CMD_USER_1 = 31010
+local COMMAND_LONG_ID = 76
+local COMMAND_ACK_ID = 77
+local RESULT_ACCEPTED, RESULT_DENIED = 0, 2
+local MAV_SEVERITY_INFO = 6
 local TICK_MS = 100
+local USER_MOVE_US = 4 -- a focus input change this big is the user's command
+
+-- The binding's receive queue is the autopilot's, shared by every script and sized by the first
+-- one to ask, so this script registers once for all its cameras. Without the binding there is
+-- no lease, and Focus now gets no answer.
+local lease_available = mavlink ~= nil and pcall(function()
+    -- (queue depth 10, 1 message id)
+    mavlink:init(10, 1)
+    -- False when this script already registered it before a scripting restart, which keeps
+    -- the registration: fine.
+    mavlink:register_rx_msgid(COMMAND_LONG_ID)
+    assert(mavlink:block_command(MAV_CMD_USER_1))
+end)
+
+-- The lease commands since the last run, by the camera id they name.
+local function receive_commands()
+    local inboxes = {}
+    while lease_available do
+        local msg, chan = mavlink:receive_chan()
+        if msg == nil then break end
+        -- mavlink_message_t: the system id at byte 8, then the component id, the 24-bit message
+        -- id and the payload, packed from byte 9 or spread out by the build (the Navigator's
+        -- ArduSub 4.8: component id at byte 12, message id at 13, payload from 16)
+        local id_at = msg:find(string.pack("<I3", COMMAND_LONG_ID), 10, true) or 10
+        local p1, p2, _, p4, _, _, _, cmd = string.unpack("<fffffffH", msg, id_at + 3)
+        if cmd == MAV_CMD_USER_1 then
+            local id = math.floor(p1 + 0.5)
+            local sysid, compid = msg:byte(8), msg:byte(id_at - 1)
+            inboxes[id] = inboxes[id] or {}
+            table.insert(inboxes[id], { mode = math.floor(p2 + 0.5), ms = p4, chan = chan, sysid = sysid, compid = compid })
+        end
+    end
+    return inboxes
+end
 
 -- Function to set focus and zoom to trim level
 local function set_zoom_focus_to_trim(camera)
@@ -201,8 +251,28 @@ local function current_pwm(function_id, range)
     return pwm
 end
 
--- A Scripting camera: its zoom and focus come from its own camera state
-local function update_scripting_camera(camera, dt)
+-- The input whose focus output is nearest `pwm`, of the ones next to the exact inverse of
+-- `calculate_focus` (a search over the whole range would cost too many Lua instructions).
+local function input_for(camera, pwm, zoom_input, margin_gain, correlation, range)
+    if not correlation then return clamp(pwm, range.min, range.max) end
+    local closest = interpolate_focus(zoom_input, camera.closest_points)
+    local span = (interpolate_focus(zoom_input, camera.furthest_points) - closest) * margin_gain
+    if span == 0 then return clamp(1500, range.min, range.max) end
+    local guess = math.floor(1500 + (pwm - closest - span / 2) * 400 / span + 0.5)
+    local best
+    for input = guess - 2, guess + 2 do
+        local candidate = clamp(input, range.min, range.max)
+        if best == nil or math.abs(calculate_focus(camera, candidate, zoom_input, margin_gain) - pwm)
+            < math.abs(calculate_focus(camera, best, zoom_input, margin_gain) - pwm) then
+            best = candidate
+        end
+    end
+    return best
+end
+
+-- A Scripting camera: its zoom and focus come from its own camera state, and `inbox` holds its
+-- lease commands
+local function update_scripting_camera(camera, dt, inbox)
     local zoom_range = find_servo_range(camera.k_zoom, camera.zoom_name, camera.missing_script_warned)
     local input_range = find_servo_range(camera.k_focus_input, camera.focus_input_name, camera.missing_script_warned)
     if zoom_range == nil or input_range == nil then
@@ -216,7 +286,14 @@ local function update_scripting_camera(camera, dt)
         local zoom_rate = param:get("CAM" .. camera.id .. "_ZOM_RAT_MAX") or DEFAULT_RATE_PCT_PER_S
         local focus_rate = param:get("CAM" .. camera.id .. "_FOC_RAT_MAX") or DEFAULT_RATE_PCT_PER_S
         camera.zoom_input = follow(camera.zoom_input, state:zoom_type(), state:zoom_value(), zoom_range, zoom_rate, dt)
-        camera.focus_input = follow(camera.focus_input, state:focus_type(), state:focus_value(), input_range, focus_rate, dt)
+        -- A focus a lease left stays until the camera's focus is commanded again.
+        local adopted = camera.adopted
+        if adopted and (adopted[1] ~= state:focus_type() or adopted[2] ~= state:focus_value()) then
+            camera.adopted = nil
+        end
+        if not camera.adopted then
+            camera.focus_input = follow(camera.focus_input, state:focus_type(), state:focus_value(), input_range, focus_rate, dt)
+        end
     end
     local zoom_input = math.floor(camera.zoom_input + 0.5)
     local focus_input = math.floor(camera.focus_input + 0.5)
@@ -228,19 +305,77 @@ local function update_scripting_camera(camera, dt)
         return
     end
 
-    -- Computes the output focus
-    local focus_output
+    -- Computes the output focus, and the range the focus slider covers at this zoom
+    local focus_output, focus_min, focus_max
     if enable_focus_and_zoom_correlation ~= 0 then
         focus_output = calculate_focus(camera, focus_input, zoom_input, margin_gain)
+        focus_min = calculate_focus(camera, input_range.min, zoom_input, margin_gain)
+        focus_max = calculate_focus(camera, input_range.max, zoom_input, margin_gain)
+        focus_min, focus_max = math.min(focus_min, focus_max), math.max(focus_min, focus_max)
     else
-        focus_output = focus_input
+        focus_output, focus_min, focus_max = focus_input, input_range.min, input_range.max
+    end
+
+    -- The lease. The user commanding the focus or the zoom ends it, their command wins.
+    local now = millis():tofloat()
+    local lease = camera.lease
+    if lease and (math.abs(focus_input - lease.focus_input) > USER_MOVE_US or zoom_input ~= lease.zoom_input) then
+        camera.lease, camera.denied, lease = nil, true, nil
+    end
+    local current = SRV_Channels:get_output_pwm_chan(camera.focus_ch) or focus_output
+    local acks = {}
+    for _, command in ipairs(inbox) do
+        local result = RESULT_ACCEPTED
+        if command.mode == 1 and camera.denied then
+            result = RESULT_DENIED
+        elseif command.mode == 1 then
+            if lease == nil then
+                -- Off the override, keeping the output where it is: the manager's DO_SET_SERVO
+                -- takes effect from now on.
+                SRV_Channels:set_output_pwm_chan_timeout(camera.focus_ch, current, 0)
+                lease = { focus_input = focus_input, zoom_input = zoom_input }
+                camera.lease = lease
+            end
+            lease.until_ms, lease.released = now + clamp(command.ms, TICK_MS, 3000), nil
+        else
+            camera.denied = false
+            if lease then lease.released = true end
+        end
+        acks[#acks + 1] = { command, result }
+    end
+    -- Released, not renewed in time, or driven out of the slider's range: the focus stays where
+    -- it was left (within that range).
+    local outside = current < focus_min or current > focus_max
+    if lease and (lease.released or now > lease.until_ms or outside) then
+        local reason = outside and "out of range" or (lease.released and "released" or "expired")
+        camera.lease, camera.denied = nil, outside
+        local pwm = clamp(current, focus_min, focus_max)
+        if math.abs(pwm - focus_output) > 1 then
+            focus_input = input_for(camera, pwm, zoom_input, margin_gain, enable_focus_and_zoom_correlation ~= 0, input_range)
+            camera.focus_input = focus_input
+            camera.adopted = state and { state:focus_type(), state:focus_value() } or { 0, 0 }
+            focus_output = enable_focus_and_zoom_correlation ~= 0
+                and calculate_focus(camera, focus_input, zoom_input, margin_gain) or focus_input
+        end
+        if reason ~= "released" then
+            gcs:send_text(MAV_SEVERITY_INFO, string.format("4K Cam: camera %d focus lease %s, focus kept at %d", camera.id, reason, focus_output))
+        end
     end
 
     SRV_Channels:set_output_pwm(camera.k_zoom, zoom_input)
     SRV_Channels:set_output_pwm(camera.k_focus_input, focus_input)
-    -- Forced, so a DO_SET_SERVO from anyone has no effect until the next run renews it; it
-    -- outlasts a late run, where the output keeps its last value anyway.
-    SRV_Channels:set_output_pwm_chan_timeout(camera.focus_ch, focus_output, 2 * TICK_MS + 50)
+    if camera.lease == nil then
+        -- Forced, so a DO_SET_SERVO from anyone has no effect until the next run renews it;
+        -- it outlasts a late run, where the output keeps its last value anyway.
+        SRV_Channels:set_output_pwm_chan_timeout(camera.focus_ch, focus_output, 2 * TICK_MS + 50)
+    end
+    for _, ack in ipairs(acks) do
+        local command, result = ack[1], ack[2]
+        local focus = camera.lease and current or focus_output
+        -- COMMAND_ACK: command, result, progress, result_param2 (focus | zoom << 16), target
+        mavlink:send_chan(command.chan, COMMAND_ACK_ID,
+            string.pack("<HBBiBB", MAV_CMD_USER_1, result, 0, focus | (zoom_input << 16), command.sysid, command.compid))
+    end
 end
 
 -- A Servo camera: its zoom and focus come from ArduPilot's one CameraZoom and CameraFocus.
@@ -314,9 +449,10 @@ function update()
         end
     end
 
+    local inboxes = receive_commands()
     for _, camera in ipairs(CAMERAS) do
         if scripting[camera] then
-            update_scripting_camera(camera, dt)
+            update_scripting_camera(camera, dt, inboxes[camera.id] or {})
         else
             update_servo_camera(camera, written)
         end

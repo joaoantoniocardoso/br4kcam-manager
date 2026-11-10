@@ -872,6 +872,22 @@ mod tests {
             }
         end
         gcs = { send_text = function(_, _, text) TEXTS[#TEXTS + 1] = text end }
+        -- The MAVLink binding: `lease(...)` queues a Focus now lease command, `ACKS` holds the
+        -- COMMAND_ACKs sent, as { command, result, progress, result_param2, system, component }.
+        INBOX, ACKS = {}, {}
+        mavlink = {
+            init = function() end,
+            register_rx_msgid = function() return true end,
+            block_command = function() return true end,
+            receive_chan = function() local m = table.remove(INBOX, 1); if m then return m, 0 end end,
+            send_chan = function(_, _, _, payload) ACKS[#ACKS + 1] = { string.unpack("<HBBiBB", payload) } end,
+        }
+        function lease(id, mode, ms)
+            -- mavlink_message_t: 7 header bytes, system and component ids, message id; then
+            -- COMMAND_LONG's payload
+            INBOX[#INBOX + 1] = string.rep("\0", 7) .. string.pack("<BB", 1, 198) .. string.rep("\0", 3)
+                .. string.pack("<fffffffHBBB", id, mode, 0, ms, 0, 0, 0, 31010, 1, 1, 0)
+        end
         camera = {
             get_state = function(_, instance)
                 local state = STATES[instance]
@@ -1077,7 +1093,9 @@ mod tests {
     fn the_script_leaves_the_commands_to_ardupilot() {
         let [first, _] = both();
         let contents = generate_lua_script(&[&first]).unwrap();
-        assert!(!contents.contains("block_command(") && !contents.contains("register_rx_msgid("));
+        // Only the Focus now lease's own command is taken from ArduPilot.
+        assert_eq!(contents.matches("block_command(").count(), 1);
+        assert!(contents.contains("block_command(MAV_CMD_USER_1)"));
         assert!(contents.contains("get_state(camera.id - 1)"));
     }
 
@@ -1411,6 +1429,91 @@ mod tests {
         sim.servo_command(90.0, 90.0);
         sim.tick();
         assert_eq!(sim.outputs(0), held);
+    }
+
+    #[test]
+    fn focus_now_drives_the_focus_output_only_while_it_holds_the_lease() {
+        let [first, _] = both();
+        let mut sim = Sim::new(&[&first]);
+        let channel = first.parameters.focus_channel as u8 - 1;
+        let output = |sim: &Sim| sim.global::<i64>(&format!("OUT_CH[{channel}]"));
+        let overridden =
+            |sim: &Sim| sim.global::<bool>(&format!("OVERRIDE_UNTIL[{channel}] > NOW"));
+        let drive = |sim: &Sim, pwm: i64| {
+            sim.lua
+                .load(format!("OUT_CH[{channel}] = {pwm}"))
+                .exec()
+                .unwrap()
+        };
+        let command = |sim: &mut Sim, mode: u8| {
+            sim.lua
+                .load(format!("lease(1, {mode}, 1500)"))
+                .exec()
+                .unwrap();
+            sim.tick();
+        };
+        let last_ack = |sim: &Sim| {
+            (
+                sim.global::<u8>("ACKS[#ACKS][2]"),
+                sim.global::<i64>("ACKS[#ACKS][4] & 0xFFFF"),
+            )
+        };
+
+        // Outside a lease the script holds the output with an override, so a DO_SET_SERVO
+        // does nothing past the next run.
+        sim.focus(40.0, 1);
+        let at_40 = output(&sim);
+        assert!(overridden(&sim));
+        drive(&sim, at_40 - 30);
+        sim.tick();
+        assert_eq!(output(&sim), at_40);
+
+        // A hold takes the override off where the output is, and the manager drives it.
+        command(&mut sim, 1);
+        assert_eq!(last_ack(&sim), (0, at_40));
+        assert!(!overridden(&sim));
+        drive(&sim, at_40 - 30);
+        command(&mut sim, 1);
+        sim.tick();
+        assert_eq!(output(&sim), at_40 - 30);
+
+        // A release leaves the focus there, until the focus is commanded again.
+        command(&mut sim, 0);
+        assert!(overridden(&sim));
+        assert!((output(&sim) - (at_40 - 30)).abs() <= 1, "{}", output(&sim));
+        let kept = output(&sim);
+        sim.tick();
+        assert_eq!(output(&sim), kept);
+        sim.focus(60.0, 1);
+        let at_60 = output(&sim);
+        assert_ne!(at_60, kept);
+
+        // A lease not renewed (the manager is gone) ends the same way, and says so.
+        command(&mut sim, 1);
+        drive(&sim, at_60 + 20);
+        for _ in 0..16 {
+            sim.tick();
+        }
+        assert!((output(&sim) - (at_60 + 20)).abs() <= 1);
+        assert!(overridden(&sim));
+        assert!(
+            sim.global::<String>("TEXTS[#TEXTS]")
+                .contains("lease expired")
+        );
+
+        // The user commanding the focus ends it at once, and holds are refused until a release.
+        sim.focus(40.0, 1);
+        command(&mut sim, 1);
+        drive(&sim, at_40 - 30);
+        sim.focus(70.0, 1);
+        let at_70 = output(&sim);
+        assert_ne!(at_70, at_40 - 30);
+        assert!(overridden(&sim));
+        command(&mut sim, 1);
+        assert_eq!(last_ack(&sim).0, 2);
+        command(&mut sim, 0);
+        command(&mut sim, 1);
+        assert_eq!(last_ack(&sim), (0, at_70));
     }
 
     #[test]
