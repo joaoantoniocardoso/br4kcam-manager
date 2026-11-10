@@ -139,7 +139,7 @@ const SPEEDS: [f64; 4] = [100.0, 75.0, 50.0, 35.0];
 /// How far above the run-in's start a turn waits for the shaft, µs.
 const TURN_SLACK: f64 = 10.0;
 /// The 4K still's sd over the v2 hump's (`reports/isp-af-r2.md`).
-const STILL_OVER_V2: f64 = 1.12;
+pub(crate) const STILL_OVER_V2: f64 = 1.12;
 /// The sharpness a landing reports is certified with 90 % confidence: its one-sided z.
 const CONFIDENCE: f64 = 1.645;
 /// A falling step shorter than this, µs, keeps a third of the last landing's error, scatters
@@ -151,7 +151,7 @@ const OUTPUT_VAR: f64 = 0.29 * 0.29 + 0.3 * 0.3;
 
 /// The centre v2 hump's half width at half its height, µs, until a ramp measures it: about 4 on
 /// the bench's (§1.2).
-const HALF_WIDTH: f64 = 4.0;
+pub(crate) const HALF_WIDTH: f64 = 4.0;
 /// A hill-climbing close's first step over the hump's half width: the desk's port's
 /// (`reports/af-estimators.md`).
 const HILL_STEP: f64 = 0.85;
@@ -363,6 +363,46 @@ pub(crate) struct Landing {
     pub certified: bool,
     /// The sharpness the landing certifies, as a fraction of the best.
     pub sharpness: f64,
+    /// The hump's sd, µs, its height above the floor, and the floor: what a refocus starts from.
+    pub w: f64,
+    pub height: f64,
+    pub floor: Floor,
+    /// The hump's half width at half its height, µs, and the close's last hill-climbing step.
+    pub half_width: f64,
+    pub step: f64,
+}
+
+/// What a refocus starts from: a posterior on the peak's output, and what the last run measured
+/// of the hump and its floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Seed {
+    pub mu: f64,
+    pub var: f64,
+    pub w: f64,
+    pub height: f64,
+    pub floor: Floor,
+    pub half_width: f64,
+    pub step: f64,
+}
+
+/// Finds the sharpest focus at the centre, starting from [`Env::last_sent`].
+pub(crate) async fn run<E: Env>(
+    env: &mut E,
+    k: &Constants,
+    limits: &FocusNowLimits,
+) -> Result<Landing, FocusNowOutcome> {
+    search(env, k, limits, None).await
+}
+
+/// Focuses again where the lens is, from `seed`: the fine ramp over its posterior and the
+/// landing, without the coarse pass (`reports/af-control-design.md` §5.2).
+pub(crate) async fn refocus<E: Env>(
+    env: &mut E,
+    k: &Constants,
+    limits: &FocusNowLimits,
+    seed: Seed,
+) -> Result<Landing, FocusNowOutcome> {
+    search(env, k, limits, Some(seed)).await
 }
 
 /// What the coarse pass found.
@@ -483,11 +523,11 @@ async fn coarse<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOu
     })
 }
 
-/// Finds the sharpest focus at the centre, starting from [`Env::last_sent`].
-pub(crate) async fn run<E: Env>(
+async fn search<E: Env>(
     env: &mut E,
     k: &Constants,
     limits: &FocusNowLimits,
+    seed: Option<Seed>,
 ) -> Result<Landing, FocusNowOutcome> {
     let (lo, hi) = env.window();
     let t_start = env.now();
@@ -503,18 +543,32 @@ pub(crate) async fn run<E: Env>(
         height,
         x_raw,
         x_c,
-    } = match coarse(env, k).await {
-        // Started between the peak and the nearer end, the pass went the other way: once more
-        // from the end it reached, over the whole window.
-        Err(FocusNowOutcome::LowTexture) => coarse(env, k).await?,
-        coarse => coarse?,
+    } = match seed {
+        // From where the lens rests, as if a falling pass had left it there.
+        Some(seed) => Coarse {
+            falling: true,
+            v: k.v_f,
+            tc: t_start,
+            t_on: f64::INFINITY,
+            on_start: false,
+            floor: seed.floor,
+            height: seed.height,
+            x_raw: f64::NAN,
+            x_c: seed.mu - k.c_f,
+        },
+        None => match coarse(env, k).await {
+            // Started between the peak and the nearer end, the pass went the other way: once
+            // more from the end it reached, over the whole window.
+            Err(FocusNowOutcome::LowTexture) => coarse(env, k).await?,
+            coarse => coarse?,
+        },
     };
     let end = if falling { lo } else { hi };
 
     // 2. Fine: a posterior on the output that, reached falling, puts the lens on the peak (its
     // mean and variance), updated by each pass; it stops once the landing is certified within
     // the user's sharpness, or at a limit (`reports/af-control-design.md` §3, `isp-af-r4.md`).
-    let mut passes = 1;
+    let mut passes = u8::from(seed.is_none());
     let elapsed = |env: &E| env.now() - t_start;
     let learned = |n: usize, sd: f64, spread: f64| {
         if n > 0 {
@@ -537,10 +591,14 @@ pub(crate) async fn run<E: Env>(
             tn.coarse_sd * tn.coarse_sd + learned(n, tn.coarse_sd, COARSE_SPREAD),
         )
     };
-    let w = k.w;
+    let mut w = k.w;
     let mut half_width = HALF_WIDTH;
     // The spike's height.
     let mut h_ref = height;
+    if let Some(seed) = seed {
+        (mu, var, w, h_ref) = (seed.mu, seed.var, seed.w, seed.height);
+        half_width = seed.half_width;
+    }
     // The sharpness the close stops at, and the one `focused` claims.
     let q_stop = (f64::from(limits.sharpness) + tn.stop_dq).clamp(0.3, 0.99);
     let q_claim = (f64::from(limits.sharpness) + tn.claim_dq).clamp(0.3, 0.99);
@@ -672,9 +730,9 @@ pub(crate) async fn run<E: Env>(
             .map(|&(_, v)| v - floor.level)
             .fold(0.0, f64::max)
     };
-    // Only a ramp measures the peak's height: the coarse spike, blurred at full speed, is under
-    // it and bounds no reading.
-    let h_measured = !ramp_raw.is_nan();
+    // Only a ramp measures the peak's height (a refocus's, the run it seeds from): the coarse
+    // spike, blurred at full speed, is under it and bounds no reading.
+    let h_measured = seed.is_some() || !ramp_raw.is_nan();
     // The peak's height that bounds it: the passes' `h` with its margin, or `rest`, the
     // readings at rest's bound ([`resting`]).
     let peak = |h: f64, rest: f64| ((1.0 + tn.certify_margin) * h).max(rest);
@@ -811,6 +869,12 @@ pub(crate) async fn run<E: Env>(
         ramp_bias: mu - ramp_raw,
         certified: ok,
         sharpness,
+        w,
+        // Unmeasured, it is nothing to focus again around.
+        height: if h_measured { h_ref } else { 0.0 },
+        floor,
+        half_width,
+        step: hill_step,
     };
     info!(
         "Focus now land: u {:.0} ratio {:.2} sharpness >= {:.2}{} in {:.2} s",
@@ -1012,8 +1076,8 @@ async fn settled<E: Env>(
 }
 
 /// The statistic away from focus: its level and its frame noise (sd).
-#[derive(Debug, Clone, Copy)]
-struct Floor {
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Floor {
     level: f64,
     noise: f64,
 }
@@ -1076,6 +1140,11 @@ impl Floor {
             level,
             noise: (rms / (2.0 * (1.0 - rho)).sqrt()).max(sd),
         }
+    }
+
+    /// Its level.
+    pub(crate) fn level(&self) -> f64 {
+        self.level
     }
 
     /// The least height above it of a peak.

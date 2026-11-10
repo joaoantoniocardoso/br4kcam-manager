@@ -850,6 +850,11 @@ mod tests {
                 ramp_bias: f64::NAN,
                 certified: true,
                 sharpness: 0.9,
+                w: 3.4,
+                height: 100.0,
+                floor: Default::default(),
+                half_width: 4.0,
+                step: 2.0,
             };
             learn(camera_uuid, &landing);
         }
