@@ -300,6 +300,15 @@ pub struct FocusNowLimits {
     /// 678 × 432 px. Absent from older clients.
     #[serde(default = "centre_zones")]
     pub centre_zones: u8,
+    /// Side of a wider window, in zones, that a run whose centre shows too little detail tries
+    /// again on (odd, larger than `centre_zones`, up to 17), or 0 for none (the default). A run
+    /// on it is never "focused": the centre is not what it measured. Absent from older clients.
+    #[serde(default)]
+    pub retry_zones: u8,
+    /// Whether the retry comes after the first pass that saw too little detail, rather than
+    /// after a second one on the centre. Absent from older clients: after the second.
+    #[serde(default)]
+    pub retry_first: bool,
 }
 
 fn centre_zones() -> u8 {
@@ -313,6 +322,8 @@ impl Default for FocusNowLimits {
             max_seconds: 9.0,
             max_passes: 12,
             centre_zones: centre_zones(),
+            retry_zones: 0,
+            retry_first: false,
         }
     }
 }
