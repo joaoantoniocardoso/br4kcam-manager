@@ -280,12 +280,13 @@ pub(crate) async fn set_limits(
     if !(0.3..=0.95).contains(&limits.sharpness)
         || !(4.0..=30.0).contains(&limits.max_seconds)
         || !(3..=20).contains(&limits.max_passes)
+        || !(1..=17).contains(&limits.centre_zones)
+        || limits.centre_zones.is_multiple_of(2)
     {
         return Err(ControlError {
             status: 400,
             message:
-                "Focus now limits: sharpness 0.3 to 0.95, max_seconds 4 to 30, max_passes 3 to 20"
-                    .into(),
+                "Focus now limits: sharpness 0.3 to 0.95, max_seconds 4 to 30, max_passes 3 to 20, centre_zones odd, 1 to 17".into(),
         });
     }
     if let Some(manager) = settings::MANAGER.get() {
@@ -359,6 +360,7 @@ pub(crate) async fn set_continuous(
             .then(|| run.scene.unwrap_or_else(unanchored))
     } {
         let limits = limits(camera_uuid).await;
+        afstat::set_centre(address, limits.centre_zones.into());
         let watch = tokio::spawn(watch(
             camera_uuid,
             address,
@@ -415,6 +417,8 @@ async fn start_from(camera_uuid: Uuid, seed: Option<Seed>) -> Result<FocusNowSta
     }
     let started = Instant::now();
     let limits = limits(camera_uuid).await;
+    // The watch after the run measures on the run's window.
+    afstat::set_centre(address, limits.centre_zones.into());
     match prepare(camera_uuid, address).await {
         Ok(env) => {
             let task = tokio::spawn(focus(env, limits, seed));
