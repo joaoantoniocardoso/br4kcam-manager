@@ -30,10 +30,11 @@ const MAGIC: u32 = 0x3153_4641;
 const HEADER_LEN: usize = 28;
 const ZONE_COLUMNS: usize = 17;
 const ZONE_FIELDS: usize = 6;
-const PACKET_LEN: usize = HEADER_LEN + 15 * ZONE_COLUMNS * ZONE_FIELDS * 2;
-/// The centre 3 × 3 zones: rows 6 to 8, columns 7 to 9 (678 × 432 px of the 4K frame).
-const CENTRE_ROWS: std::ops::Range<usize> = 6..9;
-const CENTRE_COLUMNS: std::ops::Range<usize> = 7..10;
+const PACKET_LEN: usize = HEADER_LEN + ZONE_ROWS * ZONE_COLUMNS * ZONE_FIELDS * 2;
+const ZONE_ROWS: usize = 15;
+/// The side of the centre window, in zones, until a run sets another: 3 × 3 zones, rows 6 to
+/// 8, columns 7 to 9 (678 × 432 px of the 4K frame).
+const CENTRE: usize = 3;
 const V1: usize = 0;
 const V2: usize = 2;
 /// Frames kept per camera: 20 s at 30 fps.
@@ -51,6 +52,8 @@ struct Camera {
     delays: VecDeque<f64>,
     /// Until when its statistics are wanted.
     wanted_until: Option<Instant>,
+    /// The side of its centre window, in zones, when not [`CENTRE`].
+    centre: Option<usize>,
 }
 
 static CAMERAS: LazyLock<Mutex<HashMap<Ipv4Addr, Camera>>> = LazyLock::new(Default::default);
@@ -92,6 +95,25 @@ pub(crate) fn want(address: Ipv4Addr, duration: Duration) {
     }
 }
 
+/// Measures the centre of the camera at `address` on its `side` × `side` zones (odd, at most
+/// the rows high), from the next frame: the kept frames go when it changes.
+pub(crate) fn set_centre(address: Ipv4Addr, side: usize) {
+    let mut cameras = cameras();
+    let camera = cameras.entry(address).or_default();
+    if camera.centre.unwrap_or(CENTRE) != side {
+        camera.centre = Some(side);
+        camera.frames.clear();
+        camera.delays.clear();
+    }
+}
+
+fn centre(address: Ipv4Addr) -> usize {
+    cameras()
+        .get(&address)
+        .and_then(|camera| camera.centre)
+        .unwrap_or(CENTRE)
+}
+
 fn subscribe(address: Ipv4Addr) {
     if let Some(socket) = SOCKET.get()
         && let Err(error) = socket.try_send_to(SUBSCRIPTION, (address, PORT).into())
@@ -131,7 +153,7 @@ async fn listen() {
                 let IpAddr::V4(address) = sender.ip() else {
                     continue;
                 };
-                if let Some((pts, v2, v1)) = parse(&packet[..len]) {
+                if let Some((pts, v2, v1)) = parse(&packet[..len], centre(address)) {
                     receive(address, Instant::now(), pts, v2, v1);
                 }
             }
@@ -143,8 +165,8 @@ async fn listen() {
     }
 }
 
-/// Frame pts in µs, and the centre's mean v2 and v1, of a packet.
-fn parse(packet: &[u8]) -> Option<(u64, f64, f64)> {
+/// Frame pts in µs, and the mean v2 and v1 of the centre `side` × `side` zones, of a packet.
+fn parse(packet: &[u8], side: usize) -> Option<(u64, f64, f64)> {
     if packet.len() != PACKET_LEN || u32::from_le_bytes(packet[0..4].try_into().ok()?) != MAGIC {
         return None;
     }
@@ -153,10 +175,13 @@ fn parse(packet: &[u8]) -> Option<(u64, f64, f64)> {
         let at = HEADER_LEN + ((row * ZONE_COLUMNS + column) * ZONE_FIELDS + field) * 2;
         f64::from(u16::from_le_bytes([packet[at], packet[at + 1]]))
     };
+    let around = |middle: usize, side: usize| middle - side / 2..middle + side / 2 + 1;
+    let rows = around(ZONE_ROWS / 2, side.min(ZONE_ROWS));
+    let columns = around(ZONE_COLUMNS / 2, side.min(ZONE_COLUMNS));
     let centre = |index: usize| {
-        let zones = CENTRE_ROWS.len() * CENTRE_COLUMNS.len();
-        CENTRE_ROWS
-            .flat_map(|row| CENTRE_COLUMNS.map(move |column| (row, column)))
+        let zones = rows.len() * columns.len();
+        rows.clone()
+            .flat_map(|row| columns.clone().map(move |column| (row, column)))
             .map(|(row, column)| field(row, column, index))
             .sum::<f64>()
             / zones as f64
