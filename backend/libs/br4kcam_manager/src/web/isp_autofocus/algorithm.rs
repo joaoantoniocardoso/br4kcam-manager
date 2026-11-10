@@ -793,6 +793,10 @@ async fn search<E: Env>(
     while !certified(stops[stops.len() - 1].1, h_ref, q_stop, resting(&seen))
         && passes < limits.max_passes
         && elapsed(env) + tn.stop < f64::from(limits.max_seconds)
+        // A hill-climb certified by its readings ends once its step is under the shortest: the
+        // peak is bracketed, and reading on in noise only spends the time (Precise in low light
+        // went from 5.2 to 8.3 s, `reports/af-estimators.md`).
+        && !(limits.close == FocusNowClose::Hill && hill_step < tn.min_step)
     {
         let (ua, va, xa) = stops[stops.len() - 1];
         let pair = (stops.len() >= 2).then(|| stops[stops.len() - 2]);
