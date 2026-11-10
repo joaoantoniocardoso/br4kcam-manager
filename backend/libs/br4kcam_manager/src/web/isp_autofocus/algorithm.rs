@@ -2783,4 +2783,52 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn stops_once_a_reading_may_be_the_peak() {
+        // Precise on camera .10's dark, noisy hump (60 over 21 ± 7, `reports/isp-af-r5.md`, round
+        // 7): the lower bound of a reading seldom certifies 0.9, and a close without a shape used
+        // to read on away from the peak. Once a reading's upper bound reaches the passes' height
+        // it ends there, and says what its certificate says.
+        let tn = tuning(0.9);
+        let mut stopped = 0;
+        for (estimator, close, certificate) in SHORTLISTED {
+            for seed in 100u32..112 {
+                let peak = 1000.0 + 23.0 * f64::from(seed % 12);
+                let mut sim = Sim::new(
+                    u64::from(seed),
+                    peak,
+                    if seed % 2 == 0 { 981.0 } else { 1296.0 },
+                );
+                (sim.height, sim.floor) = (60.0, (21.0, 7.0));
+                sim.wait(0.5).await.unwrap();
+                let limits = FocusNowLimits {
+                    sharpness: 0.9,
+                    estimator,
+                    close,
+                    certificate,
+                    ..FocusNowLimits::default()
+                };
+                let Ok(landing) = run(&mut sim, &MODEL, &limits).await else {
+                    continue;
+                };
+                sim.wait(0.6).await.unwrap();
+                let readings: Vec<f64> = sim.notes.iter().filter_map(|&(_, v2)| v2).collect();
+                let noise = landing.floor.of_mean(landing.floor.noise, tn.read);
+                let upper = readings[0] - landing.floor.level + CONFIDENCE * noise;
+                let still = sim.still();
+                let case = format!(
+                    "{estimator:?} {close:?} {certificate:?} {seed}: {landing:?} {readings:?} still {still:.3}"
+                );
+                // Its first reading's upper bound reached the height the run ended with, at least
+                // the passes': it read no more.
+                if upper >= landing.height {
+                    assert_eq!(readings.len(), 1, "{case}");
+                    stopped += 1;
+                }
+                assert!(landing.sharpness < 0.9 || still >= 0.9, "{case}");
+            }
+        }
+        assert!(stopped > 0, "never stopped on a reading's upper bound");
+    }
 }
