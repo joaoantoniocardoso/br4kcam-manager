@@ -2736,4 +2736,51 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn converges_without_its_certificate_and_keeps_its_verdict_honest() {
+        // With `converge`, the closes without a shape stop on their own convergence, not on the
+        // certificate (`reports/af-estimators.md`): still never "focused" short of the still's
+        // sharpness asked, and on the hump (here 62 to 66 of 72 within q against 70 to 72
+        // without, the hill's bracket and its reseats costing Precise up to 5.5 µs).
+        for (estimator, close, certificate) in SHORTLISTED {
+            for (shape, skew) in [(1.5, 0.0), (2.0, 0.0), (4.0, 0.0), (3.0, 0.2)] {
+                for (seed, peak, start, weak) in
+                    [(90, 1020.0, 981.0, false), (93, 1240.0, 1296.0, true)]
+                {
+                    for sharpness in [0.5, 0.7, 0.9] {
+                        let limits = FocusNowLimits {
+                            sharpness,
+                            estimator,
+                            close,
+                            certificate,
+                            converge: true,
+                            ..FocusNowLimits::default()
+                        };
+                        let mut sim = Sim::new(seed, peak, start);
+                        (sim.shape, sim.skew) = (shape, skew);
+                        if weak {
+                            sim.height = 100.0;
+                            sim.floor = (13.0, 4.0);
+                        }
+                        sim.wait(0.5).await.unwrap();
+                        // Too little of a hump found is no claim either.
+                        let Ok(landing) = run(&mut sim, &MODEL, &limits).await else {
+                            continue;
+                        };
+                        sim.wait(0.6).await.unwrap();
+                        let (still, q) = (sim.still(), f64::from(sharpness));
+                        let case = format!(
+                            "{estimator:?} {close:?} {certificate:?} p {shape} skew {skew} {peak} weak {weak} q {q}: {landing:?} {} still {still:.3}",
+                            sim.error()
+                        );
+                        assert!(sim.error().abs() < 6.0, "{case}");
+                        assert!(landing.sharpness < q || still >= q, "{case}");
+                        assert!(!landing.certified || still >= q, "{case}");
+                        assert!(still >= landing.sharpness - 0.1, "{case}");
+                    }
+                }
+            }
+        }
+    }
 }
