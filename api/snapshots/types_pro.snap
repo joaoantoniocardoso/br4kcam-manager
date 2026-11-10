@@ -8,9 +8,15 @@ export type ExposureMode = "program" | "shutter" | "manual";
 
 export type ExposureWarning = "too_dark" | "too_bright";
 
+export type FocusNowCertificate = "measured";
+
+export type FocusNowClose = "parabola";
+
 export type FocusNowContinuous = {
     enabled: boolean,
 };
+
+export type FocusNowEstimator = "parabola";
 
 export type FocusNowFallback = "kept_best" | "restored_start";
 
@@ -21,6 +27,9 @@ export type FocusNowLimits = {
     centre_zones: number,
     retry_zones: number,
     retry_first: boolean,
+    estimator: FocusNowEstimator,
+    close: FocusNowClose,
+    certificate: FocusNowCertificate,
 };
 
 export type FocusNowOutcome = "focused" | "approximate" | "scene_changed" | "low_texture" | "no_peak" | "reader_missing" | "command_lost" | "focus_moved" | "stopped" | "not_available";
