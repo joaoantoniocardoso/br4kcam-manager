@@ -271,6 +271,18 @@ pub struct FocusNowResult {
     /// The sharpness at the landing it certifies, as a fraction of the best (90 % confidence),
     /// or null when it did not land.
     pub sharpness: Option<f32>,
+    /// Where a run that failed left the focus, or null when it landed or did not move it.
+    pub fallback: Option<FocusNowFallback>,
+}
+
+/// Where a failed Focus now left the focus.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowFallback {
+    /// On the sharpest position it measured, sharper at rest than where it started.
+    KeptBest,
+    /// Back where it started: nothing it measured was sharper.
+    RestoredStart,
 }
 
 /// What a Focus now stops at: the first of the sharpness it certifies, its time, or its passes.
