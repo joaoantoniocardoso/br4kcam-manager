@@ -217,6 +217,71 @@
         </BlueButton>
         <span class="readout-value">{{ focusNowText }}</span>
       </div>
+      <!-- What Focus now stops at: the first of the sharpness it certifies, its time, its passes. -->
+      <template v-if="capabilities?.focus && pro?.focus != null && focusNow">
+        <BlueButtonGroup
+          :key="`focus-now-accuracy-${focusNow.limits.sharpness}`"
+          label="Accuracy"
+          :disabled="controlsDisabled || focusNow.running"
+          :button-items="focusNowPresetItems"
+          theme="dark"
+          type="switch"
+        />
+        <div class="readout mb-2">
+          <span class="readout-label" />
+          <BlueButton
+            variant="text"
+            density="compact"
+            theme="dark"
+            @click="focusNowLimitsOpen = !focusNowLimitsOpen"
+          >
+            {{ focusNowLimitsOpen ? 'Fewer limits' : 'More limits' }}
+          </BlueButton>
+        </div>
+        <template v-if="focusNowLimitsOpen">
+          <BlueSlider
+            :model-value="focusNow.limits.sharpness * 100"
+            :disabled="controlsDisabled || focusNow.running"
+            name="focus-now-sharpness"
+            label="Sharpness"
+            :min="30"
+            :max="95"
+            :step="5"
+            :format-display="(value: number) => `${Math.round(value)} % of best`"
+            theme="dark"
+            value-weight="regular"
+            label-width="130px"
+            @update:model-value="setFocusNowLimits({ sharpness: ($event as number) / 100 })"
+          />
+          <BlueSlider
+            :model-value="focusNow.limits.max_seconds"
+            :disabled="controlsDisabled || focusNow.running"
+            name="focus-now-max-seconds"
+            label="Max time"
+            :min="4"
+            :max="30"
+            :step="1"
+            :format-display="(value: number) => `${Math.round(value)} s`"
+            theme="dark"
+            value-weight="regular"
+            label-width="130px"
+            @update:model-value="setFocusNowLimits({ max_seconds: $event as number })"
+          />
+          <BlueSlider
+            :model-value="focusNow.limits.max_passes"
+            :disabled="controlsDisabled || focusNow.running"
+            name="focus-now-max-passes"
+            label="Max passes"
+            :min="3"
+            :max="20"
+            :step="1"
+            theme="dark"
+            value-weight="regular"
+            label-width="130px"
+            @update:model-value="setFocusNowLimits({ max_passes: $event as number })"
+          />
+        </template>
+      </template>
       <BlueSlider
         v-if="capabilities?.zoom && pro?.zoom != null"
         :model-value="pro.zoom"
@@ -378,6 +443,7 @@ import {
 import type {
   CameraStateEvent,
   ExposureMode,
+  FocusNowLimits,
   FocusNowPhase,
   FocusNowStatus,
   MaxIso,
@@ -452,8 +518,18 @@ const FOCUS_NOW_PHASES: Record<FocusNowPhase, string> = {
   land: 'Moving there...',
 }
 
+// Focus now's accuracy presets: the sharpness it certifies, as a fraction of the best. On the
+// 4K centre crops, 0.9 (half a sigma) cannot be told from the best, 0.7 is a little softer side by
+// side, 0.5 is soft only next to the best (reports/isp-af-r4.md).
+const FOCUS_NOW_PRESETS = [
+  { name: 'Fast', sharpness: 0.5, tooltip: 'At least half as sharp as the best: the quickest' },
+  { name: 'Balanced', sharpness: 0.7, tooltip: 'At least 70 % as sharp as the best' },
+  { name: 'Precise', sharpness: 0.9, tooltip: 'At least 90 % as sharp as the best: takes longer' },
+]
+
 const pro = ref<ProState | null>(null)
 const focusNow = ref<FocusNowStatus | null>(null)
+const focusNowLimitsOpen = ref(false)
 const capabilities = ref<ProCapabilities | null>(null)
 // Only Exposure opens by default: the tab often sits in a narrow panel beside the video.
 // Which panels are open is remembered on this browser.
@@ -805,8 +881,7 @@ const focusNowText = computed(() => {
   if (!status.reader_running) return "No AF statistics from the camera: its reader isn't running"
   const last = status.last
   if (!last) return ''
-  const ratio = last.ratio != null ? ` (${Math.round(last.ratio * 100)} % of the peak)` : ''
-  return `${last.message}${ratio}`
+  return last.message
 })
 
 const loadFocusNow = async (uuid: string) => {
@@ -829,6 +904,36 @@ const startFocusNow = () => {
     .catch((error) => {
       console.error('Error starting Focus now:', error)
       emit('error', `Focus now did not start: ${formatRequestError(error)}`)
+      void loadFocusNow(uuid)
+    })
+}
+
+const focusNowPresetItems = computed(() => {
+  const sharpness = focusNow.value?.limits.sharpness ?? 0
+  const items = FOCUS_NOW_PRESETS.map((preset) => ({
+    name: preset.name,
+    tooltip: preset.tooltip,
+    preSelected: Math.abs(sharpness - preset.sharpness) < 0.01,
+    onSelected: () => setFocusNowLimits({ sharpness: preset.sharpness }),
+  }))
+  // A sharpness set under More limits: shown as such, not as the first preset.
+  if (items.some((item) => item.preSelected)) return items
+  return [...items, { name: 'Custom', tooltip: `${Math.round(sharpness * 100)} % of the best`, preSelected: true, onSelected: () => {} }]
+})
+
+const setFocusNowLimits = (change: Partial<FocusNowLimits>) => {
+  const uuid = props.selectedCameraUuid
+  const status = focusNow.value
+  if (!uuid || !status || controlsDisabled.value) return
+  const limits = { ...status.limits, ...change }
+  focusNow.value = { ...status, limits }
+  backendClient
+    .request<FocusNowStatus>('POST', path(uuid, '/focus_now/limits'), limits)
+    .then((answer) => {
+      if (uuid === props.selectedCameraUuid) focusNow.value = answer
+    })
+    .catch((error) => {
+      emit('error', `Focus now limits not saved: ${formatRequestError(error)}`)
       void loadFocusNow(uuid)
     })
 }
