@@ -484,6 +484,23 @@ impl MavlinkComponent {
         Err(anyhow!(reason))
     }
 
+    /// Sends a command without waiting for its ACK or taking the transaction lock, for commands
+    /// a caller repeats and confirms by their effect.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn send_command_unacked(&self, command: COMMAND_LONG_DATA) -> Result<()> {
+        let header = MavHeader {
+            system_id: self.inner.system_id,
+            component_id: self.inner.component_id,
+            sequence: 0,
+        };
+        let sender = self.inner.get_sender().await;
+        sender.send(Message::ToBeSent((
+            header,
+            MavMessage::COMMAND_LONG(command),
+        )))?;
+        Ok(())
+    }
+
     /// Subscribe to the shared MAVLink message broadcast for this component.
     #[instrument(level = "debug", skip(self))]
     pub async fn get_receiver(&self) -> broadcast::Receiver<Message> {
