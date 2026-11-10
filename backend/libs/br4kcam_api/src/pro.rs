@@ -295,6 +295,15 @@ pub struct FocusNowLimits {
     pub max_seconds: f32,
     /// Most passes (the coarse pass, each ramp, each reading at rest), 3 to 20.
     pub max_passes: u8,
+    /// Side of the centre window the sharpness is measured on, in AF zones of 226 × 144 px:
+    /// odd, 1 to 17, at most the 15 rows high (17 is the whole picture); 3 (the default) is
+    /// 678 × 432 px. Absent from older clients.
+    #[serde(default = "centre_zones")]
+    pub centre_zones: u8,
+}
+
+fn centre_zones() -> u8 {
+    3
 }
 
 impl Default for FocusNowLimits {
@@ -303,6 +312,7 @@ impl Default for FocusNowLimits {
             sharpness: 0.7,
             max_seconds: 9.0,
             max_passes: 12,
+            centre_zones: centre_zones(),
         }
     }
 }
