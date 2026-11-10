@@ -1973,6 +1973,11 @@ mod tests {
             }
         }
 
+        /// The 4K still's sharpness at the lens, over its best: the same hump, wider.
+        fn still(&self) -> f64 {
+            generalized(self.error(), STILL_OVER_V2 * 3.4, self.shape, self.skew)
+        }
+
         fn v2(&mut self, x: f64) -> f64 {
             let height = if self.plant.t > self.blank_after {
                 0.0
@@ -2240,6 +2245,45 @@ mod tests {
                     "{seed}: {landing:?} {}",
                     sim.error()
                 );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn certifies_only_the_sharpness_it_reaches() {
+        // Landed "certified", the lens is within the sharpness asked; stopped by its passes or its
+        // time first, it lands on what it knows and the sharpness it reports holds.
+        for (sharpness, max_passes, max_seconds) in [
+            (0.5, 8, 10.0),
+            (0.9, 8, 10.0),
+            (0.7, 3, 10.0),
+            (0.7, 8, 4.0),
+        ] {
+            let limits = FocusNowLimits {
+                sharpness,
+                max_seconds,
+                max_passes,
+                ..FocusNowLimits::default()
+            };
+            for seed in 30..42 {
+                let peak = 1000.0 + 23.0 * (seed % 12) as f64;
+                let start = if seed % 2 == 0 { 981.0 } else { 1296.0 };
+                let mut sim = Sim::new(seed, peak, start);
+                sim.wait(0.5).await.unwrap();
+                let landing = run(&mut sim, &MODEL, &limits).await;
+                sim.wait(0.6).await.unwrap();
+                let Ok(landing) = landing else {
+                    continue;
+                };
+                let still = sim.still();
+                let case = format!("{limits:?} {seed}: {landing:?} {}", sim.error());
+                assert!(
+                    !landing.certified || still >= f64::from(sharpness),
+                    "{case}"
+                );
+                // The sharpness reported is a 90 % bound: within the model's frame noise of it.
+                assert!(still >= landing.sharpness - 0.02, "{case}");
+                assert!(landing.seconds < f64::from(max_seconds) + 1.0, "{case}");
             }
         }
     }
