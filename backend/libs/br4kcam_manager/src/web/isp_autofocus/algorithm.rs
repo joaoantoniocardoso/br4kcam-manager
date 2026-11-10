@@ -809,8 +809,15 @@ async fn search<E: Env>(
     // The peak's height that bounds it: the passes' `h` with its margin, or `rest`, the
     // readings at rest's bound ([`resting`]).
     let peak = |h: f64, rest: f64| ((1.0 + tn.certify_margin) * h).max(rest);
-    let certified =
-        |v: f64, h: f64, q: f64, rest: f64| h_measured && measured(v, peak(h, rest)) >= q;
+    // A reading over what the passes measured, past their margin and its own noise, is no peak
+    // landed on but the scene's level moved (a black-level hop of 3 to 16 %, `reports/
+    // af-dark-frames.md`; in the dark, t9c said "focused" on blur 7 of 24 times, round 9): the
+    // measured certificate takes nothing from it.
+    let h_passes = (1.0 + tn.certify_margin) * h_ref;
+    let moved = |v: f64| above(v) > h_passes + CONFIDENCE * floor.of_mean(noise, tn.read);
+    let certified = |v: f64, h: f64, q: f64, rest: f64| {
+        h_measured && !moved(v) && measured(v, peak(h, rest)) >= q
+    };
     let target = (mu - tn.v2_over_still).round().clamp(lo, hi);
     let t = env.now();
     env.send(hi.min(target + k.h + tn.margin));
@@ -955,7 +962,7 @@ async fn search<E: Env>(
     let rest = resting(&seen);
     let ok = certified(v_landed, h_ref, q_claim, rest);
     // What it can certify, at the 90 % the result promises, whatever the preset certifies at.
-    let sharpness = if !h_measured {
+    let sharpness = if !h_measured || moved(v_landed) {
         0.0
     } else {
         measured(v_landed, peak(h_ref, rest)).clamp(0.0, 1.0)
