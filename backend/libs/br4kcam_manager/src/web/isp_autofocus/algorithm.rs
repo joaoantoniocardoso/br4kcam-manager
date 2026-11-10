@@ -341,6 +341,11 @@ pub(crate) trait Env {
     fn outputs(&self, t0: f64, t1: f64) -> Vec<(f64, f64)>;
     /// Called as the procedure enters each phase.
     fn phase(&mut self, phase: FocusNowPhase);
+    /// What the run measured of the peak: a reading at rest at an output (`Some(v2)`), or where
+    /// the passes place it (`None`); a failed run falls back on the best of them.
+    fn note(&mut self, u: f64, v2: Option<f64>) {
+        let _ = (u, v2);
+    }
 }
 
 /// Where a run left the focus.
@@ -564,6 +569,9 @@ async fn search<E: Env>(
         },
     };
     let end = if falling { lo } else { hi };
+    if !x_c.is_nan() {
+        env.note(x_c + k.c_f, None);
+    }
 
     // 2. Fine: a posterior on the output that, reached falling, puts the lens on the peak (its
     // mean and variance), updated by each pass; it stops once the landing is certified within
@@ -700,6 +708,7 @@ async fn search<E: Env>(
         h_ref = pass.height;
         ramp_raw = pass.u_at;
         (mu, var) = update(mu, var, pass.u_at + k.ramp_bias, ramp_var(v));
+        env.note(mu, None);
         info!(
             "Focus now fine: {v} µs/s, peak at {:.1} w {w:.2} v2 {:.1}{}, posterior {mu:.1} ± {:.2}",
             pass.u_at,
@@ -885,6 +894,116 @@ async fn search<E: Env>(
         landing.seconds
     );
     Ok(landing)
+}
+
+/// Frames a fall-back reads at each place: enough for their noise to tell a side of the play.
+const FALL_BACK_READ: u8 = 12;
+/// How long a fall-back takes to reach and read a place at most, s: 1.6 to 2.2 live (t9c, the
+/// night of 2026-11-10).
+const FALL_BACK_STEP: f64 = 2.2;
+
+/// Where a failed run left the lens, with its reading at rest.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FallBack {
+    /// On the peak the run measured best (`u` of [`fall_back`]): sharper than the start, read
+    /// just before (the second value).
+    Best(f64, f64),
+    /// Back on the start: its output reached falling, or falling to one play below it, as the
+    /// lens was where the start was reached rising (`reports/isp-af-r5.md`, round 8).
+    Start(f64),
+}
+
+/// After a failed run, reads at rest, each reached falling past the play: the peak it measured
+/// best (`u`, when it has one), the start's output, and one play below it; it leaves the lens on
+/// the sharpest of them: the start's output unless another reads sharper by four times the
+/// readings' noise (in noise, a reading cannot tell the sides of the play apart). It ends by
+/// `until` (the run's time limit): short of time, without the start's other side of the play,
+/// and without time for even that, it reads nothing (an error).
+pub(crate) async fn fall_back<E: Env>(
+    env: &mut E,
+    k: &Constants,
+    limits: &FocusNowLimits,
+    u: Option<f64>,
+    start: f64,
+    until: f64,
+) -> Result<FallBack, FocusNowOutcome> {
+    let tn = tuning(limits.sharpness);
+    let (lo, hi) = env.window();
+    let mut targets: Vec<f64> = u
+        .map(|u| u - tn.v2_over_still)
+        .into_iter()
+        .chain([start, start - k.h])
+        .map(|target| target.round().clamp(lo, hi))
+        .collect();
+    // Each position, and the move back onto the one it keeps.
+    let fits =
+        |env: &E, targets: &[f64]| env.now() + (targets.len() + 1) as f64 * FALL_BACK_STEP <= until;
+    if !fits(env, &targets) {
+        targets.pop();
+    }
+    if !fits(env, &targets) {
+        return Err(FocusNowOutcome::Stopped);
+    }
+    let mut readings = Vec::with_capacity(targets.len());
+    for &target in &targets {
+        readings.push(read_falling(env, k, &tn, target).await?);
+    }
+    let first = usize::from(u.is_some());
+    let beats = |(a, sa): (f64, f64), (b, sb): (f64, f64)| a - b > 4.0 * sa.hypot(sb);
+    let start = if readings.len() > first + 1 && beats(readings[first + 1], readings[first]) {
+        first + 1
+    } else {
+        first
+    };
+    let i = if u.is_some() && beats(readings[0], readings[start]) {
+        0
+    } else {
+        start
+    };
+    if i + 1 != targets.len() {
+        read_falling(env, k, &tn, targets[i]).await?;
+    }
+    Ok(if i == 0 && u.is_some() {
+        FallBack::Best(readings[0].0, readings[start].0)
+    } else {
+        FallBack::Start(readings[i].0)
+    })
+}
+
+/// Reaches `target` falling past the play and reads it at rest over [`FALL_BACK_READ`] frames:
+/// their mean and its noise (their sd over √n).
+async fn read_falling<E: Env>(
+    env: &mut E,
+    k: &Constants,
+    tn: &Tuning,
+    target: f64,
+) -> Result<(f64, f64), FocusNowOutcome> {
+    let hi = env.window().1;
+    let t = env.now();
+    let from = env.last_sent();
+    env.send(hi.min(target + k.h + tn.margin));
+    settled(env, t, env.last_sent() - from, k, tn).await?;
+    stop(env, target, k.h + tn.margin, k, tn).await?;
+    at_rest(env, FALL_BACK_READ.saturating_sub(tn.read)).await
+}
+
+/// After `more` frames, the v2 of the last [`FALL_BACK_READ`] frames: their mean and its noise
+/// (their sd over √n).
+async fn at_rest<E: Env>(env: &mut E, more: u8) -> Result<(f64, f64), FocusNowOutcome> {
+    wait(env, f64::from(more) * FRAME).await?;
+    let now = env.now();
+    let frames = env.frames(now - f64::from(FALL_BACK_READ) * FRAME, now);
+    if frames.len() < 2 {
+        return Err(FocusNowOutcome::ReaderMissing);
+    }
+    let n = frames.len() as f64;
+    let mean = frames.iter().map(|frame| frame.v2).sum::<f64>() / n;
+    let var = frames
+        .iter()
+        .map(|frame| (frame.v2 - mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+    Ok((mean, (var / n).sqrt()))
 }
 
 /// A measuring ramp's result.
@@ -1207,6 +1326,7 @@ async fn stop<E: Env>(
         return Err(FocusNowOutcome::ReaderMissing);
     }
     let reading = frames.iter().map(|frame| frame.v2).sum::<f64>() / frames.len() as f64;
+    env.note(u, Some(reading));
     info!(
         "Focus now stop: {u:.0} from {:.1} µs, output at +{:.3} s, read from +{:.3} s: v2 {reading:.1}",
         d.abs(),
