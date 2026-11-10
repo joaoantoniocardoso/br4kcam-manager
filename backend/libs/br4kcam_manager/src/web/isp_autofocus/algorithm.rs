@@ -2196,6 +2196,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn focuses_again_from_its_own_landing() {
+        // Focus now pressed again where it has just landed: the lens rests on the peak, so the
+        // coarse pass sees only its falling side, and its first frames are no floor
+        // (`reports/isp-af-r3.md`: low_texture on both cameras). As in focus, and on camera
+        // .10's floor (see `takes_no_noise_on_the_floor_for_a_peak`).
+        for (seed, peak) in [(19, 1020.0), (20, 1100.0), (21, 1180.0), (22, 1260.0)] {
+            for offset in [-2.0, 0.0, 2.0] {
+                for weak in [false, true] {
+                    let mut sim = Sim::new(seed, peak, (peak + C_F + offset).round());
+                    if weak {
+                        sim.height = 100.0;
+                        sim.floor = (13.0, 4.0);
+                    }
+                    let landing = focus(&mut sim).await;
+                    sim.wait(0.6).await.unwrap();
+                    assert!(
+                        landing.is_ok_and(|landing| landing.ratio > LANDED_RATIO)
+                            && sim.error().abs() < 4.0,
+                        "{peak} {offset} {weak}: {landing:?} {}",
+                        sim.error()
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn takes_no_lens_at_rest_for_a_peak() {
         // `reports/isp-af-r2.md`: at zoom 1.7 a weak peak, blurred by the full-speed pass,
         // spiked under what the lens saw resting at the window's end. The pass took the end
