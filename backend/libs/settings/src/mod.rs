@@ -13,6 +13,8 @@ use crate::v0::SettingsDataV0;
 
 pub use manager::{MANAGER, Manager, clear, init, last_save_error};
 
+// Read and written whole, once per save: its size does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "version")]
 pub enum RawSettingsData {
@@ -24,6 +26,7 @@ pub trait SettingsDataImpl: std::fmt::Debug + Send + Sync {
     fn get_actuators(&self) -> &IndexMap<Uuid, CameraActuatorsSettings>;
     fn get_actuators_mut(&mut self) -> &mut IndexMap<Uuid, CameraActuatorsSettings>;
     fn get_program_max_exposure_mut(&mut self) -> &mut IndexMap<Uuid, u32>;
+    fn get_focus_now_limits_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLimits>;
 
     fn to_raw(&self) -> RawSettingsData;
 }

@@ -38,6 +38,7 @@ impl Settings {
             inner: Box::new(SettingsDataV1 {
                 actuators,
                 program_max_exposure: IndexMap::default(),
+                focus_now_limits: IndexMap::default(),
             }),
         };
 
@@ -169,6 +170,10 @@ impl Settings {
         self.inner.get_program_max_exposure_mut()
     }
 
+    pub fn get_focus_now_limits_mut(&mut self) -> &mut IndexMap<Uuid, crate::FocusNowLimits> {
+        self.inner.get_focus_now_limits_mut()
+    }
+
     pub fn to_raw(&self) -> RawSettingsData {
         self.inner.to_raw()
     }
@@ -222,6 +227,7 @@ pub async fn clear() -> Result<()> {
 
     guard.settings.get_actuators_mut().clear();
     guard.settings.get_program_max_exposure_mut().clear();
+    guard.settings.get_focus_now_limits_mut().clear();
     guard.settings.save().await
 }
 

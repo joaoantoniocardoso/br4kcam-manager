@@ -11,7 +11,30 @@ pub struct SettingsDataV1 {
     /// Manual, which lifts the limit; put back when Program returns. Absent from older files.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub program_max_exposure: IndexMap<Uuid, u32>,
+    /// What each camera's Focus now stops at. Absent from older files.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub focus_now_limits: IndexMap<Uuid, FocusNowLimits>,
     // todo: pub image: IndexMap<Uuid, CameraImageSettings>,
+}
+
+/// A camera's Focus now limits (`br4kcam_api::pro::FocusNowLimits`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FocusNowLimits {
+    pub sharpness: f32,
+    pub max_seconds: f32,
+    pub max_passes: u8,
+    /// Absent from older files: the 3 × 3 zones of before.
+    #[serde(default = "centre_zones")]
+    pub centre_zones: u8,
+    /// Absent from older files: no retry window.
+    #[serde(default)]
+    pub retry_zones: u8,
+    #[serde(default)]
+    pub retry_first: bool,
+}
+
+fn centre_zones() -> u8 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -181,6 +204,7 @@ impl From<SettingsDataV0> for SettingsDataV1 {
         SettingsDataV1 {
             actuators: IndexMap::default(),
             program_max_exposure: IndexMap::default(),
+            focus_now_limits: IndexMap::default(),
         }
     }
 }
@@ -196,6 +220,10 @@ impl SettingsDataImpl for SettingsDataV1 {
 
     fn get_program_max_exposure_mut(&mut self) -> &mut IndexMap<Uuid, u32> {
         &mut self.program_max_exposure
+    }
+
+    fn get_focus_now_limits_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLimits> {
+        &mut self.focus_now_limits
     }
 
     fn to_raw(&self) -> RawSettingsData {
