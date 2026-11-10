@@ -74,6 +74,10 @@ pub(crate) struct Constants {
     pub coarse_bias_r: f64,
     /// sd of the centre v2 hump, µs (§1.2).
     pub w: f64,
+    /// The landing measures v2 above the floor under the hump, the scene's pedestal near focus
+    /// ([`Pass::level`]), rather than the pass's: a landing off the peak on the pedestal does not
+    /// certify (false "focused" 14 to 16 % at Balanced, 1/2000 s ISO 1600, on the desk's bridge).
+    pub local_floor: bool,
 }
 
 /// The constants `afalgo.py` ran live with on camera .10 (§5.3), its coarse biases measured again.
@@ -96,6 +100,7 @@ pub(crate) const CONSTANTS: Constants = Constants {
     coarse_bias_f: -8.0,
     coarse_bias_r: 25.0,
     w: 3.4,
+    local_floor: true,
 };
 
 /// The statistic's frame period, s.
@@ -620,6 +625,8 @@ async fn search<E: Env>(
     };
     let mut w = k.w;
     let mut half_width = HALF_WIDTH;
+    // The floor under the hump, as a slow pass measures it.
+    let mut under = floor.level;
     // The spike's height.
     let mut h_ref = height;
     if let Some(seed) = seed {
@@ -703,7 +710,19 @@ async fn search<E: Env>(
             env.last_sent()
         };
         let u_end = lo.max((mu - 3.0 * var.sqrt() - 10.0).min(u_slow - 150.0));
-        let Some(pass) = ramp(env, k, &tn, top, u_slow, v, u_end, floor, limits.estimator).await?
+        let Some(pass) = ramp(
+            env,
+            k,
+            &tn,
+            top,
+            u_slow,
+            v,
+            u_end,
+            floor,
+            limits.estimator,
+            half_width,
+        )
+        .await?
         else {
             info!("Focus now fine: no peak");
             return Err(FocusNowOutcome::NoPeak);
@@ -725,6 +744,7 @@ async fn search<E: Env>(
         if let Some(half) = pass.half_width {
             half_width = half.clamp(2.5, 6.0);
         }
+        under = pass.level.unwrap_or(under);
         h_ref = pass.height;
         ramp_raw = pass.u_at;
         (mu, var) = update(mu, var, pass.u_at + k.ramp_bias, ramp_var(v));
@@ -747,6 +767,16 @@ async fn search<E: Env>(
     // read at rest. Certified when that reading alone bounds the error
     // within the limit; else the readings at rest place the peak, then a falling step onto it.
     env.phase(FocusNowPhase::Land);
+    // On the floor under the hump: the passes' height above it, not above the scene's pedestal.
+    let floor = if k.local_floor && under > floor.level {
+        h_ref = (h_ref - (under - floor.level)).max(f64::MIN_POSITIVE);
+        Floor {
+            level: under,
+            ..floor
+        }
+    } else {
+        floor
+    };
     let above = |v: f64| (v - floor.level).max(f64::MIN_POSITIVE);
     // A reading over the height `h` of the peak, at the reading's lower bound (its frames' noise
     // over their root count): v2's sharpness against what the run measured, with no shape and no
@@ -1079,6 +1109,10 @@ struct Pass {
     u_at: f64,
     /// Half its width at half its height, µs, when it crosses that on both sides.
     half_width: Option<f64>,
+    /// The floor under the hump, the scene's pedestal near focus: the mean over its flanks of
+    /// their lowest 3-frame mean one and a half to three half widths from its top, when there are
+    /// frames there.
+    level: Option<f64>,
     /// Its height above the floor.
     height: f64,
     /// It came while the ramp still ran fast.
@@ -1100,6 +1134,7 @@ async fn ramp<E: Env>(
     u_end: f64,
     floor: Floor,
     estimator: FocusNowEstimator,
+    half_width: f64,
 ) -> Result<Option<Pass>, FocusNowOutcome> {
     let (lo, _) = env.window();
     let tr0 = env.now();
@@ -1175,6 +1210,28 @@ async fn ramp<E: Env>(
     };
     Ok(Some(Pass {
         u_at,
+        level: {
+            let top = frames[i].t;
+            // From one and a half to three half widths (`half_width`, µs) of the top: the hump is
+            // down to a fifth and less there on most shapes, a broad pedestal still near its value
+            // at the top. Its own crossings would be the pedestal's under a high one.
+            let lowest = |sign: f64| {
+                frames
+                    .windows(3)
+                    .filter(|three| {
+                        let off = sign * (three[1].t - top) * v;
+                        (1.5 * half_width..=3.0 * half_width).contains(&off)
+                    })
+                    .map(|three| three.iter().map(|frame| frame.v2).sum::<f64>() / 3.0)
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let found: Vec<f64> = [lowest(-1.0), lowest(1.0)]
+                .into_iter()
+                .filter(|level| level.is_finite())
+                .collect();
+            (!found.is_empty())
+                .then(|| (found.iter().sum::<f64>() / found.len() as f64).max(floor.level))
+        },
         half_width: half_height(&frames, i, floor.level)
             .map(|(before, after)| v * (after - before) / 2.0),
         height,
