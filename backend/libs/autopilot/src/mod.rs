@@ -374,6 +374,73 @@ pub async fn send_focus(camera_uuid: Uuid, focus: f32) -> Result<()> {
     manager::Manager::apply_state_setpoints(&focus, &parameters).await
 }
 
+/// How long a Focus now lease lasts unless renewed, ms: the script renews nothing itself, so a
+/// manager gone mid-run hands the focus back after this.
+pub const FOCUS_LEASE_MS: f32 = 1500.0;
+
+/// Takes a camera's focus output from its Lua script (`hold`, which also renews it, waiting for
+/// the script's ACK when `confirm`) or hands it back. While held, [`send_focus_output`] drives
+/// it; the script keeps the zoom and ends the lease when the user commands the focus or zoom.
+#[instrument(level = "debug")]
+pub async fn focus_lease(camera_uuid: Uuid, hold: bool, confirm: bool) -> Result<()> {
+    use ::mavlink::ardupilotmega::{COMMAND_LONG_DATA, MavCmd};
+
+    let camera_id = {
+        let manager = MANAGER.get().context("Not available")?.read().await;
+        manager
+            .settings
+            .actuators
+            .get(&camera_uuid)
+            .context(crate::ACTUATORS_NOT_CONFIGURED)?
+            .parameters
+            .camera_id
+    };
+    let command = COMMAND_LONG_DATA {
+        target_system: 1,
+        target_component: 1,
+        command: MavCmd::MAV_CMD_USER_1,
+        param1: camera_id as u8 as f32,
+        param2: if hold { 1.0 } else { 0.0 },
+        param4: FOCUS_LEASE_MS,
+        ..Default::default()
+    };
+    let mavlink = crate::mavlink::component()?;
+    if confirm {
+        mavlink.send_command(command).await
+    } else {
+        mavlink.send_command_unacked(command).await
+    }
+}
+
+/// Sets a camera's focus output, µs, with `DO_SET_SERVO`, without waiting: the autopilot
+/// ACKs it even when the script holds the output, so a caller confirms it on the reported
+/// outputs (see [`watch_lens_outputs`]). Only takes effect under [`focus_lease`].
+#[instrument(level = "debug")]
+pub async fn send_focus_output(camera_uuid: Uuid, pwm: u16) -> Result<()> {
+    use ::mavlink::ardupilotmega::{COMMAND_LONG_DATA, MavCmd};
+
+    let channel = {
+        let manager = MANAGER.get().context("Not available")?.read().await;
+        manager
+            .settings
+            .actuators
+            .get(&camera_uuid)
+            .context(crate::ACTUATORS_NOT_CONFIGURED)?
+            .parameters
+            .focus_channel
+    };
+    crate::mavlink::component()?
+        .send_command_unacked(COMMAND_LONG_DATA {
+            target_system: 1,
+            target_component: 1,
+            command: MavCmd::MAV_CMD_DO_SET_SERVO,
+            param1: channel as u8 as f32,
+            param2: f32::from(pwm),
+            ..Default::default()
+        })
+        .await
+}
+
 #[instrument(level = "debug")]
 pub(crate) async fn control_inner(
     actuators_control: Json<api::ActuatorsControl>,
