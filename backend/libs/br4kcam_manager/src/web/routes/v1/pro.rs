@@ -15,8 +15,8 @@ use axum::{
     routing::{get, post},
 };
 use br4kcam_api::pro::{
-    Aperture, ExposureMode, ExposureWarning, FullGain, MaxIso, ProCapabilities, ProSettings,
-    ProState, Range, WhiteBalance, WhiteBalanceScene,
+    Aperture, ExposureMode, ExposureWarning, FocusNowLimits, FullGain, MaxIso, ProCapabilities,
+    ProSettings, ProState, Range, WhiteBalance, WhiteBalanceScene,
 };
 use br4kcam_commands::{
     Action as CameraAction, CameraControl,
@@ -195,6 +195,10 @@ pub fn router() -> Router {
             "/{camera_uuid}/focus_now",
             get(http_focus_now_status).post(http_focus_now),
         )
+        .route(
+            "/{camera_uuid}/focus_now/limits",
+            post(http_focus_now_limits),
+        )
         .route("/{camera_uuid}/focus_now/stop", post(http_focus_now_stop))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -232,6 +236,12 @@ pub(crate) async fn ws_request(
         ("POST", "focus_now") => isp_autofocus::start(camera_uuid)
             .await
             .map(|status| (202, json!(status))),
+        ("POST", "focus_now/limits") => match serde_json::from_value(body.unwrap_or(Value::Null)) {
+            Ok(limits) => isp_autofocus::set_limits(camera_uuid, limits)
+                .await
+                .map(|status| (200, json!(status))),
+            Err(error) => Err(bad_request(format!("{error}"))),
+        },
         ("POST", "focus_now/stop") => isp_autofocus::stop(camera_uuid)
             .await
             .map(|status| (200, json!(status))),
@@ -287,6 +297,14 @@ async fn http_focus_now(Path(camera_uuid): Path<Uuid>) -> Response {
         Ok(status) => (StatusCode::ACCEPTED, Json(status)).into_response(),
         Err(error) => error_response(error),
     }
+}
+
+#[instrument(level = "debug")]
+async fn http_focus_now_limits(
+    Path(camera_uuid): Path<Uuid>,
+    Json(limits): Json<FocusNowLimits>,
+) -> Response {
+    respond(isp_autofocus::set_limits(camera_uuid, limits).await)
 }
 
 #[instrument(level = "debug")]
