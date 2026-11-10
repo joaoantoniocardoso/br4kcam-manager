@@ -330,6 +330,8 @@ pub enum FocusNowEstimator {
     /// The parabola through the maximum and its two neighbours, on the statistic itself.
     #[default]
     Parabola,
+    /// Midway between where the hump crosses half its height on either side.
+    Midpoint,
 }
 
 /// How a Focus now's landing closes on the peak from its readings at rest.

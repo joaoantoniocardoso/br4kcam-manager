@@ -270,6 +270,7 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
             retry_first: limits.retry_first,
             estimator: match limits.estimator {
                 settings::FocusNowEstimator::Parabola => FocusNowEstimator::Parabola,
+                settings::FocusNowEstimator::Midpoint => FocusNowEstimator::Midpoint,
             },
             close: match limits.close {
                 settings::FocusNowClose::Parabola => FocusNowClose::Parabola,
@@ -315,6 +316,7 @@ pub(crate) async fn set_limits(
                 retry_first: limits.retry_first,
                 estimator: match limits.estimator {
                     FocusNowEstimator::Parabola => settings::FocusNowEstimator::Parabola,
+                    FocusNowEstimator::Midpoint => settings::FocusNowEstimator::Midpoint,
                 },
                 close: match limits.close {
                     FocusNowClose::Parabola => settings::FocusNowClose::Parabola,

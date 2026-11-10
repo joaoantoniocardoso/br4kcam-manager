@@ -56,6 +56,7 @@ fn centre_zones() -> u8 {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowEstimator {
+    Midpoint,
     #[default]
     #[serde(other)]
     Parabola,
@@ -394,7 +395,7 @@ mod tests {
             centre_zones: 5,
             retry_zones: 17,
             retry_first: true,
-            estimator: FocusNowEstimator::Parabola,
+            estimator: FocusNowEstimator::Midpoint,
             close: FocusNowClose::Parabola,
             certificate: FocusNowCertificate::Measured,
         };

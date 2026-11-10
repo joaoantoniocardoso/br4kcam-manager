@@ -21,7 +21,7 @@
 //! Every move is confirmed on the reported outputs (`SERVO_OUTPUT_RAW`) and re-sent once
 //! when they do not show it; the wait after it is the model's travel time.
 
-use br4kcam_api::pro::{FocusNowLimits, FocusNowOutcome, FocusNowPhase};
+use br4kcam_api::pro::{FocusNowEstimator, FocusNowLimits, FocusNowOutcome, FocusNowPhase};
 use tracing::*;
 
 /// The drive model's constants (§1.2), fitted on camera .10 at zoom 1.4 unless noted.
@@ -700,7 +700,8 @@ async fn search<E: Env>(
             env.last_sent()
         };
         let u_end = lo.max((mu - 3.0 * var.sqrt() - 10.0).min(u_slow - 150.0));
-        let Some(pass) = ramp(env, k, &tn, top, u_slow, v, u_end, floor).await? else {
+        let Some(pass) = ramp(env, k, &tn, top, u_slow, v, u_end, floor, limits.estimator).await?
+        else {
             info!("Focus now fine: no peak");
             return Err(FocusNowOutcome::NoPeak);
         };
@@ -1048,6 +1049,7 @@ async fn ramp<E: Env>(
     v: f64,
     u_end: f64,
     floor: Floor,
+    estimator: FocusNowEstimator,
 ) -> Result<Option<Pass>, FocusNowOutcome> {
     let (lo, _) = env.window();
     let tr0 = env.now();
@@ -1097,7 +1099,11 @@ async fn ramp<E: Env>(
     ) else {
         return Ok(None);
     };
-    let (t_pk, height) = parabola(&frames, i, floor.level);
+    // Not a Gaussian peak fit: deferred because of patent US 12,242,169 B2.
+    let (t_pk, height) = match estimator {
+        FocusNowEstimator::Midpoint => midpoint(&frames, i, floor.level),
+        FocusNowEstimator::Parabola => parabola(&frames, i, floor.level),
+    };
     let reported = env.outputs(tr0 - 1.0, env.now());
     // A ramp step came late, stalling the ramp, when an output is reported still on a command
     // older than [`LATE`] (the ramp sends 30 commands a second, the outputs are reported 10
@@ -1388,6 +1394,17 @@ fn vertex(seen: &[(f64, f64)], reach: f64) -> Option<f64> {
     let a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / den;
     let b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / den;
     (a < 0.0).then(|| (-b / (2.0 * a)).clamp(x1 - reach, x3 + reach))
+}
+
+/// The peak of the hump at frame `i` above `level`: midway between where it crosses half its
+/// height on either side, as (time, the top frame's height). The centre of the full width at half
+/// maximum, the bisector of a spectral line at half its depth (Gray 1982, ApJ 255, 200; Dravins
+/// 1982, ARA&A 20, 61). No shape is fitted and no log taken: two crossings, linear between frames,
+/// and their mean.
+fn midpoint(frames: &[Frame], i: usize, level: f64) -> (f64, f64) {
+    let t =
+        half_height(frames, i, level).map_or(frames[i].t, |(before, after)| (before + after) / 2.0);
+    (t, frames[i].v2 - level)
 }
 
 /// The peak of the hump at frame `i` above `level`: the vertex of the parabola through it and the
