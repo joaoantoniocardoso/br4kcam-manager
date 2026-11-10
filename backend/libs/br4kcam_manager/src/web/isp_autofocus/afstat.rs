@@ -54,6 +54,9 @@ struct Camera {
     wanted_until: Option<Instant>,
     /// The side of its centre window, in zones, when not [`CENTRE`].
     centre: Option<usize>,
+    /// The side of its wider window for a retry, and its frames, when it has one.
+    retry: Option<usize>,
+    wide: VecDeque<Frame>,
 }
 
 static CAMERAS: LazyLock<Mutex<HashMap<Ipv4Addr, Camera>>> = LazyLock::new(Default::default);
@@ -96,22 +99,25 @@ pub(crate) fn want(address: Ipv4Addr, duration: Duration) {
 }
 
 /// Measures the centre of the camera at `address` on its `side` × `side` zones (odd, at most
-/// the rows high), from the next frame: the kept frames go when it changes.
-pub(crate) fn set_centre(address: Ipv4Addr, side: usize) {
+/// the rows high), and on `retry` × `retry` zones too when not 0, from the next frame: the kept
+/// frames go when either changes.
+pub(crate) fn set_centre(address: Ipv4Addr, side: usize, retry: usize) {
     let mut cameras = cameras();
     let camera = cameras.entry(address).or_default();
-    if camera.centre.unwrap_or(CENTRE) != side {
+    let retry = (retry > 0).then_some(retry);
+    if camera.centre.unwrap_or(CENTRE) != side || camera.retry != retry {
         camera.centre = Some(side);
+        camera.retry = retry;
         camera.frames.clear();
         camera.delays.clear();
+        camera.wide.clear();
     }
 }
 
-fn centre(address: Ipv4Addr) -> usize {
-    cameras()
-        .get(&address)
-        .and_then(|camera| camera.centre)
-        .unwrap_or(CENTRE)
+fn sides(address: Ipv4Addr) -> (usize, Option<usize>) {
+    cameras().get(&address).map_or((CENTRE, None), |camera| {
+        (camera.centre.unwrap_or(CENTRE), camera.retry)
+    })
 }
 
 fn subscribe(address: Ipv4Addr) {
@@ -153,8 +159,12 @@ async fn listen() {
                 let IpAddr::V4(address) = sender.ip() else {
                     continue;
                 };
-                if let Some((pts, v2, v1)) = parse(&packet[..len], centre(address)) {
-                    receive(address, Instant::now(), pts, v2, v1);
+                let (side, retry) = sides(address);
+                if let Some((pts, v2, v1)) = parse(&packet[..len], side) {
+                    let wide = retry
+                        .and_then(|retry| parse(&packet[..len], retry))
+                        .map(|(_, v2, v1)| (v2, v1));
+                    receive(address, Instant::now(), pts, v2, v1, wide);
                 }
             }
             Err(error) => {
@@ -189,7 +199,7 @@ fn parse(packet: &[u8], side: usize) -> Option<(u64, f64, f64)> {
     Some((pts, centre(V2), centre(V1)))
 }
 
-fn receive(address: Ipv4Addr, at: Instant, pts: u64, v2: f64, v1: f64) {
+fn receive(address: Ipv4Addr, at: Instant, pts: u64, v2: f64, v1: f64, wide: Option<(f64, f64)>) {
     let pts = pts as f64 / 1e6;
     let mut cameras = cameras();
     let camera = cameras.entry(address).or_default();
@@ -206,19 +216,37 @@ fn receive(address: Ipv4Addr, at: Instant, pts: u64, v2: f64, v1: f64) {
         v2,
         v1,
     });
+    if let Some((v2, v1)) = wide {
+        camera.wide.push_back(Frame {
+            t: pts + offset,
+            v2,
+            v1,
+        });
+    }
     if camera.frames.len() > KEEP {
         camera.frames.pop_front();
         camera.delays.pop_front();
+    }
+    if camera.wide.len() > KEEP {
+        camera.wide.pop_front();
     }
 }
 
 /// The frames of the camera at `address` with `t0 <= t < t1`, oldest first.
 pub(crate) fn frames(address: Ipv4Addr, t0: f64, t1: f64) -> Vec<Frame> {
+    frames_of(address, t0, t1, false)
+}
+
+/// The same on its retry window ([`set_centre`]); none without one.
+pub(crate) fn frames_wide(address: Ipv4Addr, t0: f64, t1: f64) -> Vec<Frame> {
+    frames_of(address, t0, t1, true)
+}
+
+fn frames_of(address: Ipv4Addr, t0: f64, t1: f64, wide: bool) -> Vec<Frame> {
     cameras()
         .get(&address)
         .map(|camera| {
-            camera
-                .frames
+            if wide { &camera.wide } else { &camera.frames }
                 .iter()
                 .filter(|frame| t0 <= frame.t && frame.t < t1)
                 .copied()

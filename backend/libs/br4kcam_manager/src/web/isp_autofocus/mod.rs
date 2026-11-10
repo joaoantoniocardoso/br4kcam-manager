@@ -360,7 +360,11 @@ pub(crate) async fn set_continuous(
             .then(|| run.scene.unwrap_or_else(unanchored))
     } {
         let limits = limits(camera_uuid).await;
-        afstat::set_centre(address, limits.centre_zones.into());
+        afstat::set_centre(
+            address,
+            limits.centre_zones.into(),
+            limits.retry_zones.into(),
+        );
         let watch = tokio::spawn(watch(
             camera_uuid,
             address,
@@ -418,7 +422,11 @@ async fn start_from(camera_uuid: Uuid, seed: Option<Seed>) -> Result<FocusNowSta
     let started = Instant::now();
     let limits = limits(camera_uuid).await;
     // The watch after the run measures on the run's window.
-    afstat::set_centre(address, limits.centre_zones.into());
+    afstat::set_centre(
+        address,
+        limits.centre_zones.into(),
+        limits.retry_zones.into(),
+    );
     match prepare(camera_uuid, address).await {
         Ok(env) => {
             let task = tokio::spawn(focus(env, limits, seed));
