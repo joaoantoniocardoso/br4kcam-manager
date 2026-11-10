@@ -238,6 +238,15 @@
             {{ focusNowLimitsOpen ? 'Fewer limits' : 'More limits' }}
           </BlueButton>
         </div>
+        <!-- Continuous: after a landing it watches the sharpness and focuses again when it drops. -->
+        <BlueSwitch
+          :model-value="focusNow.continuous"
+          label="Keep in focus"
+          :disabled="controlsDisabled"
+          name="focus-now-continuous"
+          theme="dark"
+          @update:model-value="setFocusNowContinuous($event as boolean)"
+        />
         <template v-if="focusNowLimitsOpen">
           <BlueSlider
             :model-value="focusNow.limits.sharpness * 100"
@@ -438,6 +447,7 @@ import {
   BlueButtonGroup,
   BlueExpansiblePanel,
   BlueSlider,
+  BlueSwitch,
   BlueTooltip,
 } from '@bluerobotics/bluevue'
 import type {
@@ -880,8 +890,9 @@ const focusNowText = computed(() => {
   if (status.running) return status.phase ? FOCUS_NOW_PHASES[status.phase] : 'Starting...'
   if (!status.reader_running) return "No AF statistics from the camera: its reader isn't running"
   const last = status.last
-  if (!last) return ''
-  return last.message
+  const watching = status.watching ? 'Keeping it in focus.' : ''
+  if (!last) return watching
+  return watching ? `${last.message}. ${watching}` : last.message
 })
 
 const loadFocusNow = async (uuid: string) => {
@@ -934,6 +945,22 @@ const setFocusNowLimits = (change: Partial<FocusNowLimits>) => {
     })
     .catch((error) => {
       emit('error', `Focus now limits not saved: ${formatRequestError(error)}`)
+      void loadFocusNow(uuid)
+    })
+}
+
+const setFocusNowContinuous = (enabled: boolean) => {
+  const uuid = props.selectedCameraUuid
+  const status = focusNow.value
+  if (!uuid || !status || controlsDisabled.value) return
+  focusNow.value = { ...status, continuous: enabled }
+  backendClient
+    .request<FocusNowStatus>('POST', path(uuid, '/focus_now/continuous'), { enabled })
+    .then((answer) => {
+      if (uuid === props.selectedCameraUuid) focusNow.value = answer
+    })
+    .catch((error) => {
+      emit('error', `Keep in focus not saved: ${formatRequestError(error)}`)
       void loadFocusNow(uuid)
     })
 }
