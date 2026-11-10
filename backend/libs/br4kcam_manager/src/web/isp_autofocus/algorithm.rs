@@ -2971,4 +2971,56 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn says_focused_on_no_noise_in_the_dark() {
+        // The real dark (round 9, R9.11: 1/60 s ISO 28 000 to 40 000 on .10, t9c "focused" on blur
+        // 7 of 24 times): v2 4200 with frame noise sd 150, its successive frames correlated
+        // (ρ 0.8, temporal noise reduction), a black-level hop of 3 to 16 % at a random time,
+        // and no hump or a weak one. Nothing in noise alone is a peak, and nothing it lands on
+        // is called focused short of the still's own sharpness.
+        for (estimator, close, certificate) in SHORTLISTED {
+            for seed in 400..430u64 {
+                for height in [0.0, 1000.0, 1500.0] {
+                    for sharpness in [0.5, 0.7, 0.9] {
+                        let mut sim = Sim::new(
+                            seed,
+                            1000.0 + 6.0 * (seed % 40) as f64,
+                            if seed % 2 == 0 { 981.0 } else { 1296.0 },
+                        );
+                        (sim.height, sim.floor, sim.floor_rho) = (height, (4200.0, 150.0), 0.8);
+                        let mut rng = Rng(seed + 7);
+                        let at = 0.5 + 8.0 * rng.uniform();
+                        let by = if rng.uniform() < 0.5 { 1.0 } else { -1.0 }
+                            * (0.03 + 0.13 * rng.uniform());
+                        sim.hops.push((at, 1.0 + by));
+                        sim.wait(0.5).await.unwrap();
+                        let limits = FocusNowLimits {
+                            sharpness,
+                            estimator,
+                            close,
+                            certificate,
+                            ..FocusNowLimits::default()
+                        };
+                        let landed = run(&mut sim, &MODEL, &limits).await;
+                        sim.wait(0.6).await.unwrap();
+                        let still = sim.still();
+                        let case = format!(
+                            "{estimator:?} {close:?} {certificate:?} {seed} height {height} hop {by:.3} at {at:.2}: {landed:?} {} still {still:.2}",
+                            sim.error()
+                        );
+                        if height == 0.0 {
+                            assert!(landed.is_err(), "{case}");
+                        } else if let Ok(landing) = landed {
+                            assert!(
+                                landing.sharpness < f64::from(sharpness)
+                                    || still >= f64::from(sharpness),
+                                "{case}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
