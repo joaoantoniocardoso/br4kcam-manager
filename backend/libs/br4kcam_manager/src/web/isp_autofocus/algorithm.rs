@@ -346,6 +346,10 @@ pub(crate) trait Env {
     fn note(&mut self, u: f64, v2: Option<f64>) {
         let _ = (u, v2);
     }
+    /// Reads the frames of the wider retry window from now on, if there is one (whether so).
+    fn widen(&mut self) -> bool {
+        false
+    }
 }
 
 /// Where a run left the focus.
@@ -564,7 +568,19 @@ async fn search<E: Env>(
         None => match coarse(env, k).await {
             // Started between the peak and the nearer end, the pass went the other way: once
             // more from the end it reached, over the whole window.
-            Err(FocusNowOutcome::LowTexture) => coarse(env, k).await?,
+            // Still nothing (or at once, with `retry_first`): on the wider window, when the
+            // limits have one (a dark or flat centre, `reports/isp-af-r5.md`, rounds 8 and 9).
+            Err(FocusNowOutcome::LowTexture)
+                if limits.retry_first && limits.retry_zones > 0 && env.widen() =>
+            {
+                coarse(env, k).await?
+            }
+            Err(FocusNowOutcome::LowTexture) => match coarse(env, k).await {
+                Err(FocusNowOutcome::LowTexture) if limits.retry_zones > 0 && env.widen() => {
+                    coarse(env, k).await?
+                }
+                coarse => coarse?,
+            },
             coarse => coarse?,
         },
     };
@@ -897,7 +913,7 @@ async fn search<E: Env>(
 }
 
 /// Frames a fall-back reads at each place: enough for their noise to tell a side of the play.
-const FALL_BACK_READ: u8 = 12;
+pub(crate) const FALL_BACK_READ: u8 = 12;
 /// How long a fall-back takes to reach and read a place at most, s: 1.6 to 2.2 live (t9c, the
 /// night of 2026-11-10).
 const FALL_BACK_STEP: f64 = 2.2;
@@ -989,7 +1005,7 @@ async fn read_falling<E: Env>(
 
 /// After `more` frames, the v2 of the last [`FALL_BACK_READ`] frames: their mean and its noise
 /// (their sd over √n).
-async fn at_rest<E: Env>(env: &mut E, more: u8) -> Result<(f64, f64), FocusNowOutcome> {
+pub(crate) async fn at_rest<E: Env>(env: &mut E, more: u8) -> Result<(f64, f64), FocusNowOutcome> {
     wait(env, f64::from(more) * FRAME).await?;
     let now = env.now();
     let frames = env.frames(now - f64::from(FALL_BACK_READ) * FRAME, now);
