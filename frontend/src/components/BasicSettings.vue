@@ -2151,9 +2151,10 @@ const resetToRecommendedDefaults = async (force: boolean): Promise<void> => {
     applyRecommendedDefaults(cameraUuid, false, lens)
     return
   }
+  // A forced apply always reboots, whatever the preview of a non-forced one says.
   requestAutopilotRestart(() => {
     applyRecommendedDefaults(cameraUuid, force, lens)
-  }, setupPreview)
+  }, force && setupPreview ? { ...setupPreview, reboot: true } : setupPreview)
 }
 
 const applyRecommendedDefaults = async (cameraUuid: string, force: boolean, lens: LensType | null): Promise<void> => {

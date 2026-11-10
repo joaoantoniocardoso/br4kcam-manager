@@ -1,14 +1,23 @@
 <template>
   <StatusDialogShell
     :show="show"
-    title="Restart the autopilot?"
+    :title="restarts ? 'Restart the autopilot?' : 'Apply these changes?'"
     :persistent="false"
     :logo="false"
     :width="hasPreview ? '520px' : undefined"
     @dismiss="emit('cancel')"
   >
-    <p class="text-sm text-white text-center">
+    <p
+      v-if="restarts"
+      class="text-sm text-white text-center"
+    >
       This may restart the autopilot. Actuator control is unavailable for about a minute while it comes back.
+    </p>
+    <p
+      v-else
+      class="text-sm text-white text-center"
+    >
+      The autopilot takes these changes without a restart.
     </p>
     <template v-if="preview">
       <div
@@ -83,6 +92,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ confirm: []; cancel: [] }>()
+
+/** Without a preview the apply may restart the autopilot. */
+const restarts = computed(() => props.preview?.reboot !== false)
 
 const hasPreview = computed(
   () => props.preview != null && (props.preview.changes.length > 0 || props.preview.released.length > 0),
