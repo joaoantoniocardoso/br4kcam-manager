@@ -289,6 +289,21 @@
             label-width="130px"
             @update:model-value="setFocusNowLimits({ max_passes: $event as number })"
           />
+          <!-- The centre window the sharpness is measured on, in AF zones of 226 × 144 px. -->
+          <BlueSlider
+            :model-value="focusNow.limits.centre_zones"
+            :disabled="controlsDisabled || focusNow.running"
+            name="focus-now-centre-zones"
+            label="Window"
+            :min="1"
+            :max="17"
+            :step="2"
+            :format-display="(value: number) => `${value} × ${Math.min(value, 15)} zones`"
+            theme="dark"
+            value-weight="regular"
+            label-width="130px"
+            @update:model-value="setFocusNowLimits({ centre_zones: $event as number })"
+          />
         </template>
       </template>
       <BlueSlider
