@@ -21,7 +21,9 @@
 //! Every move is confirmed on the reported outputs (`SERVO_OUTPUT_RAW`) and re-sent once
 //! when they do not show it; the wait after it is the model's travel time.
 
-use br4kcam_api::pro::{FocusNowEstimator, FocusNowLimits, FocusNowOutcome, FocusNowPhase};
+use br4kcam_api::pro::{
+    FocusNowClose, FocusNowEstimator, FocusNowLimits, FocusNowOutcome, FocusNowPhase,
+};
 use tracing::*;
 
 /// The drive model's constants (§1.2), fitted on camera .10 at zoom 1.4 unless noted.
@@ -799,7 +801,9 @@ async fn search<E: Env>(
             // search also climbs back from a step off the hump.
             Some((_, vb, xb)) if valid(vb, h_ref) && xb != xa => {
                 // No height beyond what it read.
-                let x0 = vertex(&seen, half_width)
+                let x0 = (limits.close == FocusNowClose::Parabola)
+                    .then(|| vertex(&seen, half_width))
+                    .flatten()
                     .unwrap_or_else(|| hill(&mut hill_step, xa, va, xb, vb));
                 let fit = above(va).max(above(vb));
                 // The pair's own height cannot certify the pair: what it places wrong, it also

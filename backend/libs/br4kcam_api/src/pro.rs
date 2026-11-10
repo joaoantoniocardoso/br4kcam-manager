@@ -341,6 +341,8 @@ pub enum FocusNowClose {
     /// The vertex of the parabola through the three best readings, on the statistic itself.
     #[default]
     Parabola,
+    /// Towards the higher of the last two readings, the step halved when a step loses.
+    Hill,
 }
 
 /// What bounds the sharpness a Focus now's landing reports, and so whether it says "focused".

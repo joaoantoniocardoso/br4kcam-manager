@@ -10,7 +10,7 @@ export type ExposureWarning = "too_dark" | "too_bright";
 
 export type FocusNowCertificate = "measured";
 
-export type FocusNowClose = "parabola";
+export type FocusNowClose = "parabola" | "hill";
 
 export type FocusNowContinuous = {
     enabled: boolean,

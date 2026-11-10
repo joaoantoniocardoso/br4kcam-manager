@@ -274,6 +274,7 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
             },
             close: match limits.close {
                 settings::FocusNowClose::Parabola => FocusNowClose::Parabola,
+                settings::FocusNowClose::Hill => FocusNowClose::Hill,
             },
             certificate: match limits.certificate {
                 settings::FocusNowCertificate::Measured => FocusNowCertificate::Measured,
@@ -320,6 +321,7 @@ pub(crate) async fn set_limits(
                 },
                 close: match limits.close {
                     FocusNowClose::Parabola => settings::FocusNowClose::Parabola,
+                    FocusNowClose::Hill => settings::FocusNowClose::Hill,
                 },
                 certificate: match limits.certificate {
                     FocusNowCertificate::Measured => settings::FocusNowCertificate::Measured,

@@ -66,6 +66,7 @@ pub enum FocusNowEstimator {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowClose {
+    Hill,
     #[default]
     #[serde(other)]
     Parabola,
@@ -396,7 +397,7 @@ mod tests {
             retry_zones: 17,
             retry_first: true,
             estimator: FocusNowEstimator::Midpoint,
-            close: FocusNowClose::Parabola,
+            close: FocusNowClose::Hill,
             certificate: FocusNowCertificate::Measured,
         };
         settings.focus_now_limits.insert(Uuid::nil(), limits);
