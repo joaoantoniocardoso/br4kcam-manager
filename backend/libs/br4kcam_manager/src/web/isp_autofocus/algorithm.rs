@@ -2928,4 +2928,47 @@ mod tests {
         assert!((corrected - 150.0).abs() < 30.0, "{corrected}");
         assert!(differences < 90.0, "{differences}");
     }
+
+    #[tokio::test]
+    async fn certifies_no_landing_off_the_peak_on_the_pedestal() {
+        // 1/2000 s ISO 1600 (the desk's bridge, round 10): the scene's broad hump near focus, a
+        // pedestal up to twice the centre's, and a ramp bias gone wrong, so the first landing
+        // is off the peak, on the pedestal. Measured above the pass's floor, its reading had the
+        // pedestal in it and certified (here 34 of 300 false "focused"); above the floor under
+        // the hump, none.
+        for (estimator, close, certificate) in [SHORTLISTED[0], SHORTLISTED[1]] {
+            for seed in 300..330u64 {
+                for (pedestal, ramp_bias) in
+                    [(150.0, 4.0), (150.0, -4.0), (300.0, 4.0), (300.0, -6.0)]
+                {
+                    let k = Constants {
+                        ramp_bias,
+                        ramp_learned: 5,
+                        ..MODEL
+                    };
+                    let peak = 1000.0 + 4.0 * (seed % 60) as f64;
+                    let mut sim = Sim::new(seed, peak, if seed % 2 == 0 { 981.0 } else { 1296.0 });
+                    (sim.height, sim.floor, sim.pedestal) = (150.0, (21.0, 7.0), (pedestal, 20.0));
+                    sim.wait(0.5).await.unwrap();
+                    let limits = FocusNowLimits {
+                        estimator,
+                        close,
+                        certificate,
+                        ..FocusNowLimits::default()
+                    };
+                    let landed = run(&mut sim, &k, &limits).await;
+                    sim.wait(0.6).await.unwrap();
+                    let still = sim.still();
+                    let case = format!(
+                        "{estimator:?} {seed} {pedestal} {ramp_bias}: {landed:?} {} still {still:.2}",
+                        sim.error()
+                    );
+                    assert!(
+                        landed.is_err() || landed.unwrap().sharpness < 0.7 || still >= 0.7,
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
 }
