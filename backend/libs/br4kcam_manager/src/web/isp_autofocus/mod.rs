@@ -278,6 +278,7 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
             },
             certificate: match limits.certificate {
                 settings::FocusNowCertificate::Measured => FocusNowCertificate::Measured,
+                settings::FocusNowCertificate::Monotone => FocusNowCertificate::Monotone,
             },
         })
 }
@@ -325,6 +326,7 @@ pub(crate) async fn set_limits(
                 },
                 certificate: match limits.certificate {
                     FocusNowCertificate::Measured => settings::FocusNowCertificate::Measured,
+                    FocusNowCertificate::Monotone => settings::FocusNowCertificate::Monotone,
                 },
             },
         );

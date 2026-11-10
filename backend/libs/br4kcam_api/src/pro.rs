@@ -352,6 +352,9 @@ pub enum FocusNowCertificate {
     /// The landing's reading over the peak's height the run measured, at its lower bound.
     #[default]
     Measured,
+    /// As `measured`, over a bound of the peak from the readings at rest: the highest one plus
+    /// the largest rise between neighbouring ones.
+    Monotone,
 }
 
 fn centre_zones() -> u8 {

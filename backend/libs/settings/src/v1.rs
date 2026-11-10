@@ -76,6 +76,7 @@ pub enum FocusNowClose {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowCertificate {
+    Monotone,
     #[default]
     #[serde(other)]
     Measured,

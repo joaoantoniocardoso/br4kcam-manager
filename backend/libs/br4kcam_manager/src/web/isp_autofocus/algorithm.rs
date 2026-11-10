@@ -22,7 +22,8 @@
 //! when they do not show it; the wait after it is the model's travel time.
 
 use br4kcam_api::pro::{
-    FocusNowClose, FocusNowEstimator, FocusNowLimits, FocusNowOutcome, FocusNowPhase,
+    FocusNowCertificate, FocusNowClose, FocusNowEstimator, FocusNowLimits, FocusNowOutcome,
+    FocusNowPhase,
 };
 use tracing::*;
 
@@ -752,11 +753,16 @@ async fn search<E: Env>(
     // distance. It bounds the still's wherever the still's hump is no narrower than v2's.
     let measured =
         |v: f64, h: f64| (above(v) - CONFIDENCE * floor.noise / f64::from(tn.read).sqrt()) / h;
-    // What the readings at rest `seen` bound the peak's height by: the highest of them.
+    // What the readings at rest `seen` bound the peak's height by: the monotone certificate's
+    // bound ([`monotone`]), else the highest of them.
     let resting = |seen: &[(f64, f64)]| {
-        seen.iter()
-            .map(|&(_, v)| v - floor.level)
-            .fold(0.0, f64::max)
+        if limits.certificate == FocusNowCertificate::Monotone {
+            monotone(seen, floor.level)
+        } else {
+            seen.iter()
+                .map(|&(_, v)| v - floor.level)
+                .fold(0.0, f64::max)
+        }
     };
     // Only a ramp measures the peak's height (a refocus's, the run it seeds from): the coarse
     // spike, blurred at full speed, is under it and bounds no reading.
@@ -1402,6 +1408,21 @@ fn vertex(seen: &[(f64, f64)], reach: f64) -> Option<f64> {
     let a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / den;
     let b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / den;
     (a < 0.0).then(|| (-b / (2.0 * a)).clamp(x1 - reach, x3 + reach))
+}
+
+/// An upper bound of the peak's height above `level` from the readings at rest `seen` (lens
+/// position, reading): the highest plus the largest rise between neighbouring ones, a Lipschitz
+/// bound of the curve between its samples (Piyavskii 1972, USSR Comput. Math. Math. Phys. 12(4),
+/// 57; Shubert 1972, SIAM J. Numer. Anal. 9, 379). The readings and their order only: no shape.
+fn monotone(seen: &[(f64, f64)], level: f64) -> f64 {
+    let mut seen = seen.to_vec();
+    seen.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let top = seen.iter().map(|&(_, v)| v - level).fold(0.0, f64::max);
+    let rise = seen
+        .windows(2)
+        .map(|pair| (pair[1].1 - pair[0].1).abs())
+        .fold(0.0, f64::max);
+    top + rise
 }
 
 /// The peak of the hump at frame `i` above `level`: midway between where it crosses half its

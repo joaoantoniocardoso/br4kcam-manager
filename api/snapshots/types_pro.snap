@@ -8,7 +8,7 @@ export type ExposureMode = "program" | "shutter" | "manual";
 
 export type ExposureWarning = "too_dark" | "too_bright";
 
-export type FocusNowCertificate = "measured";
+export type FocusNowCertificate = "measured" | "monotone";
 
 export type FocusNowClose = "parabola" | "hill";
 
