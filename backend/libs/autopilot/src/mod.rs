@@ -237,19 +237,21 @@ async fn setup_preview(
     overwrite: bool,
 ) -> Result<api::SetupPreview> {
     let changes = setup_changes(current, next)?;
-    // The releases need the autopilot's parameters; without them the settings still preview.
-    let released = match manager::plan::Snapshot::capture().await {
-        Ok(snapshot) => {
-            let plan = manager::plan::plan_apply(&snapshot, camera_uuid, next, overwrite)?;
-            manager::plan::describe_releases(&plan, &snapshot)
-        }
+    // The releases and the reboot need the autopilot's parameters; without them the settings
+    // still preview, and the apply may reboot.
+    let (released, reboot) = match manager::plan::Snapshot::capture().await {
+        Ok(snapshot) => manager::plan::preview(&snapshot, camera_uuid, next, overwrite)?,
         Err(error) => {
             debug!("Previewing without releases: {error:?}");
-            Vec::new()
+            (Vec::new(), true)
         }
     };
 
-    Ok(api::SetupPreview { changes, released })
+    Ok(api::SetupPreview {
+        changes,
+        released,
+        reboot,
+    })
 }
 
 /// The lens a default setup is for: the `requested` one, else the saved one.

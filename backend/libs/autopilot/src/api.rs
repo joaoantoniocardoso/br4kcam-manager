@@ -85,6 +85,9 @@ pub struct SetupPreview {
     pub changes: Vec<String>,
     /// What the camera wrote and the setup no longer uses, released as `name: old → new`.
     pub released: Vec<String>,
+    /// Whether the apply reboots the autopilot: the apply's own plan says so. True when the
+    /// autopilot's parameters could not be read to plan it.
+    pub reboot: bool,
 }
 
 impl SetupPreview {

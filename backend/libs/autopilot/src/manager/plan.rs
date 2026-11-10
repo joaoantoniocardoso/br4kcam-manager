@@ -398,6 +398,18 @@ fn script_installed(snapshot: &Snapshot, contents: &str) -> bool {
         .is_some_and(|installed| script::lua_scripts_equivalent(installed, contents))
 }
 
+/// The releases an apply of `next` carries out, as [`describe_releases`], and whether it reboots
+/// the autopilot: the plan the apply itself makes, so the preview cannot disagree with it.
+pub(crate) fn preview(
+    snapshot: &Snapshot,
+    camera_uuid: Uuid,
+    next: &api::ActuatorsConfig,
+    overwrite: bool,
+) -> Result<(Vec<String>, bool)> {
+    let plan = plan_apply(snapshot, camera_uuid, next, overwrite)?;
+    Ok((describe_releases(&plan, snapshot), plan.reboot))
+}
+
 /// The releases of `plan` as `name: old → new`, and what happens to the Lua script when the
 /// camera stops using it.
 pub(crate) fn describe_releases(plan: &ApplyPlan, snapshot: &Snapshot) -> Vec<String> {
