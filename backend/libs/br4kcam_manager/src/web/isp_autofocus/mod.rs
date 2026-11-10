@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::web::control_bridge::{ControlError, UNKNOWN_CAMERA};
 use algorithm::{
     CONSTANTS, Constants, Env, FallBack, Floor, Frame, LANDED_RATIO, Landing, READER_TIMEOUT,
-    STILL_OVER_V2, Seed,
+    STILL_OVER_V2, Seed, Tuning,
 };
 
 /// How long the first reported outputs may take, at the stream's 10 Hz.
@@ -584,6 +584,9 @@ async fn prepare(
         start,
         last_sent: f64::from(start.focus),
         sent: vec![start.focus],
+        trace: Vec::new(),
+        events: Vec::new(),
+        model: None,
         outputs,
         reported: Vec::new(),
         commands,
@@ -619,6 +622,7 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
     let camera_uuid = env.camera_uuid;
     load_learned(camera_uuid).await;
     let k = constants(camera_uuid);
+    env.model = Some((k, algorithm::tuning(limits.sharpness)));
     info!(
         "Focus now of {camera_uuid}: coarse biases F {:.1} R {:.1}, ramp bias {:.2} ({}), limits {limits:?}",
         k.coarse_bias_f, k.coarse_bias_r, k.ramp_bias, k.ramp_learned
@@ -1264,6 +1268,12 @@ struct LiveEnv {
     /// Every focus output commanded, the start's included: any other means someone else
     /// moved the focus.
     sent: Vec<u16>,
+    /// The same with when each was sent, on afstat's clock, and the run's phases, readings at
+    /// rest and estimates: its replay trace.
+    trace: Vec<(f64, u16)>,
+    events: Vec<(f64, String)>,
+    /// The constants, learned biases included, and the tuning the run started with.
+    model: Option<(Constants, Tuning)>,
     outputs: mpsc::UnboundedReceiver<(Instant, LensOutputs)>,
     /// The focus outputs reported so far, `(s, µs)`.
     reported: Vec<(f64, f64)>,
@@ -1338,6 +1348,41 @@ impl Drop for LiveEnv {
     fn drop(&mut self) {
         self.renewal.abort();
         let camera_uuid = self.camera_uuid;
+        // Everything a replay needs that the camera's statistics do not carry: the constants and
+        // tuning, the commands and the reported outputs, on afstat's clock, with its offset to
+        // the frames' pts, and when each frame came from a second before the first command.
+        let pairs = |pairs: &mut dyn Iterator<Item = (f64, f64)>| {
+            pairs
+                .map(|(t, u)| format!("{t:.3}:{u:.0}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let from = self
+            .trace
+            .first()
+            .map_or(afstat::seconds(Instant::now()), |&(t, _)| t)
+            - 1.0;
+        let (constants, tuning) = self
+            .model
+            .map_or((String::new(), String::new()), |(k, tn)| {
+                (format!("{k:?}"), format!("{tn:?}"))
+            });
+        info!(
+            "Focus now trace of {camera_uuid}: {constants} {tuning} pts offset {:.6} frames {} sent {} reported {} events {}",
+            afstat::offset(self.address).unwrap_or(f64::NAN),
+            afstat::received(self.address, from)
+                .iter()
+                .map(|(pts, at)| format!("{pts:.6}:{at:.6}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            pairs(&mut self.trace.iter().map(|&(t, u)| (t, f64::from(u)))),
+            pairs(&mut self.reported.iter().copied()),
+            self.events
+                .iter()
+                .map(|(t, what)| format!("{t:.3}:{what}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         tokio::spawn(async move {
             if let Err(error) = autopilot::focus_lease(camera_uuid, false, true).await {
                 warn!("Focus now: focus lease not released: {error:#}");
@@ -1393,6 +1438,7 @@ impl Env for LiveEnv {
         self.last_sent = output as f64;
         if let Ok(output) = u16::try_from(output) {
             self.sent.push(output);
+            self.trace.push((afstat::seconds(Instant::now()), output));
             // The receiving end lives as long as the queue is not dropped.
             let _ = self.commands.send(output);
         }
@@ -1434,12 +1480,19 @@ impl Env for LiveEnv {
     }
 
     fn phase(&mut self, phase: FocusNowPhase) {
+        let now = afstat::seconds(Instant::now());
+        self.events.push((now, format!("{phase:?}")));
         if let Some(run) = runs().get_mut(&self.camera_uuid) {
             run.phase = Some(phase);
         }
     }
 
     fn note(&mut self, u: f64, v2: Option<f64>) {
+        let now = afstat::seconds(Instant::now());
+        self.events.push(match v2 {
+            Some(v2) => (now, format!("stop {u:.0} {v2:.1}")),
+            None => (now, format!("estimate {u:.1}")),
+        });
         match v2 {
             // A reading on the retry window does not compare with the centre's start.
             Some(_) if self.wide => {}
@@ -1455,6 +1508,7 @@ impl Env for LiveEnv {
             !afstat::frames_wide(self.address, now - READER_TIMEOUT, f64::INFINITY).is_empty();
         if self.wide {
             info!("Focus now: too little detail at the centre, again on the retry window");
+            self.events.push((now, "wide".into()));
         }
         self.wide
     }
