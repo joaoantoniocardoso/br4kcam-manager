@@ -360,4 +360,35 @@ mod tests {
         };
         assert_eq!(reloaded.focus_now_limits.get(&Uuid::nil()), Some(&limits));
     }
+
+    #[test]
+    fn focus_now_learned_biases_survive_a_reload() {
+        let RawSettingsData::V1(mut settings) =
+            serde_json::from_str::<RawSettingsData>(SETTINGS_WITHOUT_LENS).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        // Files from before them load without any and save without the key.
+        assert!(settings.focus_now_learned.is_empty());
+        assert!(
+            !serde_json::to_string(&settings.to_raw())
+                .unwrap()
+                .contains("focus_now_learned")
+        );
+        let learned = FocusNowLearned {
+            falling: vec![-4.5, -2.0],
+            rising: vec![31.25],
+            ramp: vec![0.5, -0.25, 0.0],
+        };
+        settings
+            .focus_now_learned
+            .insert(Uuid::nil(), learned.clone());
+        let saved = serde_json::to_string(&settings.to_raw()).unwrap();
+        let RawSettingsData::V1(reloaded) =
+            serde_json::from_str::<RawSettingsData>(&saved).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        assert_eq!(reloaded.focus_now_learned.get(&Uuid::nil()), Some(&learned));
+    }
 }
