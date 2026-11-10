@@ -2388,4 +2388,49 @@ mod tests {
             assert!(landing.is_ok() && sim.error().abs() < 4.0, "{case}");
         }
     }
+
+    #[tokio::test]
+    async fn falls_back_on_the_sharpest_position_found() {
+        // A failed run (`reports/isp-af-r5.md`, round 8): the best position it measured, read at
+        // rest, is kept when it beats the start, else the start is restored, on the side of the
+        // play the start was reached from: never less sharp than the start. On the floor's noise
+        // alone, the start's own output.
+        for (seed, (start, rising, best, kept, floor)) in [
+            (1140.0, false, Some(1102.6), true, (0.0, 0.0)),
+            (1102.6, false, Some(1130.0), false, (0.0, 0.0)),
+            (1100.0, true, None, false, (0.0, 0.0)),
+            (1100.0, true, Some(1130.0), false, (0.0, 0.0)),
+        ]
+        .into_iter()
+        .map(|case| (80, case))
+        .chain((0..20).map(|seed| (seed, (1180.0, false, Some(1190.0), false, (21.0, 7.0)))))
+        {
+            let output = (start + C_F + if rising { H } else { 0.0 }).round();
+            let mut sim = Sim::new(seed, 1100.0, output);
+            sim.plant.x = start;
+            sim.floor = floor;
+            sim.wait(0.5).await.unwrap();
+            let frames = sim.frames(sim.now() - 0.2, f64::INFINITY);
+            let start_v2 = frames.iter().map(|frame| frame.v2).sum::<f64>() / frames.len() as f64;
+            let fell = fall_back(
+                &mut sim,
+                &MODEL,
+                &FocusNowLimits::default(),
+                best,
+                output,
+                f64::INFINITY,
+                None,
+            )
+            .await
+            .unwrap();
+            sim.wait(0.6).await.unwrap();
+            let case = format!("{seed} {start} {rising} {best:?}: {fell:?} against {start_v2}");
+            assert_eq!(matches!(fell, FallBack::Best(..)), kept, "{case}");
+            let x = sim.error() + 1100.0;
+            assert!(
+                (x - if kept { 1100.0 } else { start }).abs() < 4.0,
+                "{case}: lens at {x}"
+            );
+        }
+    }
 }
