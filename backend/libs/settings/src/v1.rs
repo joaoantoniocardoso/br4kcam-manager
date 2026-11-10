@@ -38,10 +38,45 @@ pub struct FocusNowLimits {
     pub retry_zones: u8,
     #[serde(default)]
     pub retry_first: bool,
+    /// Absent from older files, or a value this build does not offer: the defaults, the parabola
+    /// on the ramp and at the landing, and the measured certificate.
+    #[serde(default)]
+    pub estimator: FocusNowEstimator,
+    #[serde(default)]
+    pub close: FocusNowClose,
+    #[serde(default)]
+    pub certificate: FocusNowCertificate,
 }
 
 fn centre_zones() -> u8 {
     3
+}
+
+/// `br4kcam_api::pro::FocusNowEstimator`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowEstimator {
+    #[default]
+    #[serde(other)]
+    Parabola,
+}
+
+/// `br4kcam_api::pro::FocusNowClose`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowClose {
+    #[default]
+    #[serde(other)]
+    Parabola,
+}
+
+/// `br4kcam_api::pro::FocusNowCertificate`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowCertificate {
+    #[default]
+    #[serde(other)]
+    Measured,
 }
 
 /// The biases a camera's certified Focus now runs measured, µs, newest last: its coarse pass's,
@@ -359,6 +394,9 @@ mod tests {
             centre_zones: 5,
             retry_zones: 17,
             retry_first: true,
+            estimator: FocusNowEstimator::Parabola,
+            close: FocusNowClose::Parabola,
+            certificate: FocusNowCertificate::Measured,
         };
         settings.focus_now_limits.insert(Uuid::nil(), limits);
         let saved = serde_json::to_string(&settings.to_raw()).unwrap();

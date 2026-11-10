@@ -26,8 +26,8 @@ use autopilot::{
     api::{Action as AutopilotAction, ActuatorsConfig, ActuatorsControl, FocusZoomPoints},
 };
 use br4kcam_api::pro::{
-    FocusNowContinuous, FocusNowFallback, FocusNowLimits, FocusNowOutcome, FocusNowPhase,
-    FocusNowResult, FocusNowStatus,
+    FocusNowCertificate, FocusNowClose, FocusNowContinuous, FocusNowEstimator, FocusNowFallback,
+    FocusNowLimits, FocusNowOutcome, FocusNowPhase, FocusNowResult, FocusNowStatus,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
@@ -268,6 +268,15 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
             centre_zones: limits.centre_zones,
             retry_zones: limits.retry_zones,
             retry_first: limits.retry_first,
+            estimator: match limits.estimator {
+                settings::FocusNowEstimator::Parabola => FocusNowEstimator::Parabola,
+            },
+            close: match limits.close {
+                settings::FocusNowClose::Parabola => FocusNowClose::Parabola,
+            },
+            certificate: match limits.certificate {
+                settings::FocusNowCertificate::Measured => FocusNowCertificate::Measured,
+            },
         })
 }
 
@@ -304,6 +313,15 @@ pub(crate) async fn set_limits(
                 centre_zones: limits.centre_zones,
                 retry_zones: limits.retry_zones,
                 retry_first: limits.retry_first,
+                estimator: match limits.estimator {
+                    FocusNowEstimator::Parabola => settings::FocusNowEstimator::Parabola,
+                },
+                close: match limits.close {
+                    FocusNowClose::Parabola => settings::FocusNowClose::Parabola,
+                },
+                certificate: match limits.certificate {
+                    FocusNowCertificate::Measured => settings::FocusNowCertificate::Measured,
+                },
             },
         );
         // A failed save shows in the health report; the limits still hold until a restart.

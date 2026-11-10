@@ -309,6 +309,45 @@ pub struct FocusNowLimits {
     /// after a second one on the centre. Absent from older clients: after the second.
     #[serde(default)]
     pub retry_first: bool,
+    /// How the fine ramp places the peak of the hump it crossed. Absent from older clients:
+    /// `parabola`.
+    #[serde(default)]
+    pub estimator: FocusNowEstimator,
+    /// How the landing closes on the peak from its readings at rest. Absent from older clients:
+    /// `parabola`.
+    #[serde(default)]
+    pub close: FocusNowClose,
+    /// What the sharpness a landing reports is bounded by. Absent from older clients:
+    /// `measured`.
+    #[serde(default)]
+    pub certificate: FocusNowCertificate,
+}
+
+/// How a Focus now places the peak of the hump its fine ramp crossed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowEstimator {
+    /// The parabola through the maximum and its two neighbours, on the statistic itself.
+    #[default]
+    Parabola,
+}
+
+/// How a Focus now's landing closes on the peak from its readings at rest.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowClose {
+    /// The vertex of the parabola through the three best readings, on the statistic itself.
+    #[default]
+    Parabola,
+}
+
+/// What bounds the sharpness a Focus now's landing reports, and so whether it says "focused".
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusNowCertificate {
+    /// The landing's reading over the peak's height the run measured, at its lower bound.
+    #[default]
+    Measured,
 }
 
 fn centre_zones() -> u8 {
@@ -324,6 +363,9 @@ impl Default for FocusNowLimits {
             centre_zones: centre_zones(),
             retry_zones: 0,
             retry_first: false,
+            estimator: FocusNowEstimator::default(),
+            close: FocusNowClose::default(),
+            certificate: FocusNowCertificate::default(),
         }
     }
 }
