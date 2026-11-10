@@ -2896,4 +2896,36 @@ mod tests {
             assert!(from_median > 60.0, "{seed}: {from_median}");
         }
     }
+
+    #[test]
+    fn measures_the_floor_noise_of_correlated_frames() {
+        // At high gain successive frames correlate (lag-1 ρ 0.75 to 0.8 at 1/60 s ISO 40 000,
+        // the desk's dark cells): their differences read the noise about 2.2 times low. With a
+        // second of frames at rest it reads their true sd, 150 here, over runs (a second of such
+        // frames holds only a few independent ones).
+        let (mut corrected, mut differences) = (Vec::new(), Vec::new());
+        for seed in 0..20 {
+            let mut rng = Rng(seed);
+            let mut noise = 0.0;
+            let frames: Vec<Frame> = (0..60)
+                .map(|n| {
+                    noise = 0.8 * noise + 0.6 * rng.normal(150.0);
+                    Frame {
+                        t: f64::from(n) * FRAME,
+                        v2: 4200.0 + noise,
+                        v1: 0.0,
+                    }
+                })
+                .collect();
+            corrected.push(Floor::of(&frames, &frames[..30]).noise);
+            differences.push(Floor::of(&frames, &[]).noise);
+        }
+        let median = |mut values: Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        let (corrected, differences) = (median(corrected), median(differences));
+        assert!((corrected - 150.0).abs() < 30.0, "{corrected}");
+        assert!(differences < 90.0, "{differences}");
+    }
 }
