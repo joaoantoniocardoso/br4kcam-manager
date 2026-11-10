@@ -2316,4 +2316,32 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn focuses_again_around_where_the_lens_is() {
+        // Continuous mode: the lens left off the peak by k sd of the still, either side, with
+        // the posterior the watch gives it (its distance from the drop, its sign unknown). One
+        // ramp over it and a landing, without the coarse pass.
+        let sd = STILL_OVER_V2 * 3.4;
+        for (seed, peak) in [(50, 1020.0), (51, 1100.0), (52, 1180.0), (53, 1260.0)] {
+            for k in [-3.0, -1.5, -1.0, 1.0, 1.5, 3.0] {
+                let mut sim = Sim::new(seed, peak, (peak + C_F + k * sd).round());
+                sim.wait(0.5).await.unwrap();
+                let seed = Seed {
+                    mu: sim.last_sent,
+                    var: (f64::abs(k) * sd + 2.0).powi(2),
+                    w: 3.4,
+                    height: sim.height,
+                    floor: Floor::default(),
+                    half_width: HALF_WIDTH,
+                    step: 2.0,
+                };
+                let landing = refocus(&mut sim, &MODEL, &FocusNowLimits::default(), seed).await;
+                sim.wait(0.6).await.unwrap();
+                let case = format!("{peak} {k}: {landing:?} {}", sim.error());
+                assert!(sim.error().abs() < 4.0, "{case}");
+                assert!(landing.unwrap().seconds < 5.0, "{case}");
+            }
+        }
+    }
 }
