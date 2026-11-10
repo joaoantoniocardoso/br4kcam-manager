@@ -2287,4 +2287,33 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn closes_on_the_hump_from_a_wrong_ramp_bias() {
+        // A camera's learned ramp bias gone wrong (its zero walked, round 4 on camera .10): the
+        // first landing is off the hump on either side, readings there below its floor's
+        // noise. It finds the hump again from the readings at rest.
+        for ramp_bias in [-8.0, -5.0, 5.0, 8.0] {
+            let k = Constants {
+                ramp_bias,
+                ramp_learned: 5,
+                ..MODEL
+            };
+            for (seed, peak) in [(40, 1020.0), (41, 1100.0), (42, 1180.0), (43, 1260.0)] {
+                for start in [981.0, 1296.0] {
+                    let mut sim = Sim::new(seed, peak, start);
+                    if seed % 2 == 0 {
+                        sim.height = 100.0;
+                        sim.floor = (13.0, 4.0);
+                    }
+                    sim.wait(0.5).await.unwrap();
+                    let landing = run(&mut sim, &k, &FocusNowLimits::default()).await;
+                    sim.wait(0.6).await.unwrap();
+                    let case = format!("{ramp_bias} {peak} {start}: {landing:?} {}", sim.error());
+                    assert!(landing.is_ok() && sim.error().abs() < 4.0, "{case}");
+                    assert!(landing.unwrap().seconds < 10.0, "{case}");
+                }
+            }
+        }
+    }
 }
