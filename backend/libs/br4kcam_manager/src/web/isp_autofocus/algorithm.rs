@@ -2433,4 +2433,20 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn notes_what_a_failed_run_measured() {
+        // The detail goes after the coarse pass: the run fails, but it noted where its passes
+        // placed the peak, which a fall-back can then try.
+        let mut sim = Sim::new(8, 1100.0, 981.0);
+        sim.blank_after = 2.0;
+        assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::NoPeak));
+        assert!(
+            sim.notes
+                .iter()
+                .any(|&(u, v2)| v2.is_none() && (u - 1100.0).abs() < 30.0),
+            "{:?}",
+            sim.notes
+        );
+    }
 }
