@@ -2474,4 +2474,95 @@ mod tests {
             }
         }
     }
+
+    /// The frames of a ramp across a hump peaking at 0 s, of scale `sd_t` s, `height` over a floor
+    /// `(level, sd)`, with 3 % frame noise: each frame integrates the hump over the 1/30 s before
+    /// it, the first at `phase` of a frame.
+    #[allow(clippy::too_many_arguments)]
+    fn ramp_frames(
+        rng: &mut Rng,
+        shape: f64,
+        skew: f64,
+        sd_t: f64,
+        phase: f64,
+        height: f64,
+        floor: (f64, f64),
+    ) -> Vec<Frame> {
+        (0..36)
+            .map(|n| {
+                let t = (f64::from(n) - 18.0 + phase) * FRAME;
+                let exposed = (0..10)
+                    .map(|m| {
+                        generalized(t - FRAME * (f64::from(m) + 0.5) / 10.0, sd_t, shape, skew)
+                    })
+                    .sum::<f64>()
+                    / 10.0;
+                Frame {
+                    t,
+                    v2: height * exposed * (1.0 + rng.normal(0.03)) + floor.0 + rng.normal(floor.1),
+                    v1: 0.0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn places_the_peak_on_humps_of_other_shapes() {
+        // Each estimator on ramps across exponential-power humps (exponent 1.5 to 4, one side
+        // 20 % wider or not) at the measuring speeds (35 to 100 µs/s on a 3.4 µs hump), at every
+        // sampling phase, on a strong hump and on camera .10's weak one over its floor: its error
+        // against the top of the hump the frames saw (half a frame late), over the hump's scale.
+        type Estimator = fn(&[Frame], usize, f64) -> (f64, f64);
+        let estimators: [(&str, Estimator); 4] = [
+            ("midpoint", midpoint),
+            ("parabola", parabola),
+            ("quadratic", quadratic),
+            ("centroid", power_centroid),
+        ];
+        for (name, estimator) in estimators {
+            for shape in [1.5, 2.0, 3.0, 4.0] {
+                for skew in [0.0, 0.2] {
+                    for (height, floor) in [(2000.0, (0.0, 0.0)), (100.0, (13.0, 4.0))] {
+                        let mut rng = Rng(7);
+                        let mut errors = Vec::new();
+                        for sd_t in [0.034, 0.045, 0.068, 0.097] {
+                            for phase in 0..10 {
+                                let phase = f64::from(phase) / 10.0;
+                                let frames =
+                                    ramp_frames(&mut rng, shape, skew, sd_t, phase, height, floor);
+                                let level = floor.0;
+                                let i = hump(
+                                    &frames,
+                                    Floor {
+                                        level,
+                                        noise: floor.1,
+                                        spread: floor.1,
+                                        rho: 0.0,
+                                    },
+                                    0.0,
+                                    0.3,
+                                )
+                                .unwrap();
+                                let (t, _) = estimator(&frames, i, level);
+                                errors.push((t - FRAME / 2.0) / sd_t);
+                            }
+                        }
+                        let n = errors.len() as f64;
+                        let bias = errors.iter().sum::<f64>() / n;
+                        let mae = errors.iter().map(|e| e.abs()).sum::<f64>() / n;
+                        let worst = errors.iter().map(|e| e.abs()).fold(0.0, f64::max);
+                        let case = format!(
+                            "{name} p {shape} skew {skew} height {height}: bias {bias:.3} mean {mae:.3} worst {worst:.3}"
+                        );
+                        if skew == 0.0 {
+                            assert!(mae < 0.12 && worst < 0.35, "{case}");
+                        } else {
+                            // A side wider pulls every estimate that way.
+                            assert!(bias.abs() < 0.3 && worst < 0.45, "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
