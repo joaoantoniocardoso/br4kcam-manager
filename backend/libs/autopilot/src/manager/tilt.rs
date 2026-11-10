@@ -83,8 +83,8 @@ impl Manager {
 }
 
 /// The tilt servo and its mount: `SERVO{tilt_channel}_FUNCTION`, its PWM range and direction,
-/// and `MNT{n}_PITCH_MIN`, `_PITCH_MAX` and `_TYPE`. Returns whether a function or the mount
-/// type is written, which only take effect after a reboot.
+/// and `MNT{n}_PITCH_MIN`, `_PITCH_MAX` and `_TYPE`. Returns whether the mount type is written,
+/// which only takes effect after a reboot.
 pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
     let Change {
         current,
@@ -110,6 +110,7 @@ pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
     // moves to has none of its own.
     let force_channel = written || channel_moved;
     let force_mount = written || camera_moved;
+    let mut reboot = overwrite;
     planner.channel_range(
         next.tilt_channel,
         [
@@ -139,7 +140,7 @@ pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
         let value = ParamType::INT32(next.tilt_mnt_type as i32);
         // Mount type changes require an autopilot reboot to take effect, rewriting the same
         // type does not.
-        written |= !planner.autopilot_holds(&name, &value);
+        reboot |= !planner.autopilot_holds(&name, &value);
         planner.write_if_needed(name, value, force_mount);
     }
 
@@ -158,7 +159,7 @@ pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
         force_mount,
     );
 
-    written
+    reboot
 }
 
 pub(super) fn push_owned_expectations(

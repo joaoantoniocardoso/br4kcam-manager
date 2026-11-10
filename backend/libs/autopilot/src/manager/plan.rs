@@ -214,6 +214,14 @@ pub(super) fn servo_param(channel: api::ServoChannel, suffix: &str) -> String {
     format!("SERVO{}_{suffix}", channel as u8)
 }
 
+/// Whether a write of `name` only takes effect once the autopilot reboots: camera and mount types
+/// make their backends at boot (ArduSub 4.5.5 and 4.7.2, `AP_Camera::init`; `MNTn_TYPE` is
+/// `@RebootRequired`). Channel functions do not: Sub sets them up again every second
+/// (`Sub::one_hz_loop` → `SRV_Channels::enable_aux_servos` → `update_aux_servo_function`).
+pub(crate) fn takes_reboot(name: &str) -> bool {
+    name.ends_with("_TYPE")
+}
+
 /// The value that turns off a channel function or camera type, `None` for any other parameter.
 fn released_value(name: &str) -> Option<ParamType> {
     if name.starts_with("SERVO") && name.ends_with("_FUNCTION") {
@@ -295,7 +303,7 @@ fn refuse_taking_other_cameras(
 /// another camera's setup gives it, or else is turned off. One the autopilot holds with any
 /// other value is not this camera's anymore, so it is left alone.
 ///
-/// Returns whether anything is written, which takes an autopilot reboot.
+/// Returns whether a camera type is written, which takes an autopilot reboot.
 fn release(
     planner: &mut Planner,
     snapshot: &Snapshot,
@@ -325,12 +333,12 @@ fn release(
             continue;
         };
         if !planner.autopilot_holds(&name, &release_value) {
+            wrote |= takes_reboot(&name);
             planner.releases.push(PlannedWrite {
                 name,
                 value: release_value,
                 force: false,
             });
-            wrote = true;
         }
     }
     wrote
@@ -550,9 +558,9 @@ pub(crate) fn plan_apply(
                 change
             };
             reboot |= camera::plan(&mut planner, &change);
-            reboot |= script::plan(&mut planner, &change);
-            reboot |= focus::plan(&mut planner, &change);
-            reboot |= zoom::plan(&mut planner, &change);
+            script::plan(&mut planner, &change);
+            focus::plan(&mut planner, &change);
+            zoom::plan(&mut planner, &change);
         }
         reboot |= tilt::plan(&mut planner, &change);
         if let Some(saved) = saved {
@@ -1741,8 +1749,8 @@ after_reload:
 ## first camera script function
 writes: SERVO10_FUNCTION=98 SERVO10_MIN=870! SERVO10_TRIM=918! SERVO10_MAX=2130!
 releases: 
-script: write 11011dbf183d4799 reload: false reboot: true
-after_reload: 
+script: write 11011dbf183d4799 reload: true reboot: false
+after_reload: BR4KCAM1_ENABLE=1! BR4KCAM1_GAIN=1!
 ## forget first
 releases: CAM1_TYPE=0 SERVO12_FUNCTION=0 SERVO10_FUNCTION=0 SERVO11_FUNCTION=0 SERVO16_FUNCTION=0
 script: write 44fd81db30075ae4

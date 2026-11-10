@@ -23,8 +23,7 @@ impl Manager {
 }
 
 /// The focus servo, driven by the script: `SERVO{focus_channel}_FUNCTION` and its PWM range.
-/// Returns whether the function is written.
-pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
+pub(super) fn plan(planner: &mut Planner, change: &Change) {
     let Change {
         current,
         next,
@@ -68,8 +67,6 @@ pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
         ],
         written || channel_moved,
     );
-
-    written
 }
 
 pub(super) fn push_owned_expectations(

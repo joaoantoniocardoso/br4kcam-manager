@@ -288,8 +288,8 @@ impl Manager {
 }
 
 /// The script channel, the focus input from the GCS: `SERVO{script_channel}_FUNCTION` and
-/// its PWM range. Returns whether the function is written.
-pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
+/// its PWM range.
+pub(super) fn plan(planner: &mut Planner, change: &Change) {
     let Change {
         current,
         next,
@@ -327,8 +327,6 @@ pub(super) fn plan(planner: &mut Planner, change: &Change) -> bool {
         ],
         written || channel_moved,
     );
-
-    written
 }
 
 /// `BR4KCAM{n}_ENABLE` and `_GAIN` of `next`, each written when it changes from `current`,

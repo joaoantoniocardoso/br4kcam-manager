@@ -701,11 +701,8 @@ pub(crate) async fn control_inner(
         }
         Action::RestoreParameterDrifts(names) => {
             let camera_uuid = actuators_control.camera_uuid;
-            // Mount and camera types and channel functions only take effect after a reboot,
-            // as in the apply path.
-            let needs_reboot = names
-                .iter()
-                .any(|name| name.ends_with("_TYPE") || name.ends_with("_FUNCTION"));
+            // Mount and camera types only take effect after a reboot, as in the apply path.
+            let needs_reboot = names.iter().any(|name| manager::plan::takes_reboot(name));
             manager::reboot_outside_apply(
                 Box::pin(async {
                     let mavlink = crate::mavlink::component()?;

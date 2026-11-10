@@ -514,7 +514,9 @@ impl Manager {
         owned_parameters::reevaluate_after_apply().await;
 
         // The running script only changes once the autopilot reboots.
-        let reboot = !writes.is_empty() || script != plan::ScriptAction::Keep || reboot_pending();
+        let reboot = writes.iter().any(|write| plan::takes_reboot(&write.name))
+            || script != plan::ScriptAction::Keep
+            || reboot_pending();
         if reboot {
             set_reboot_pending(true);
         }
