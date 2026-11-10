@@ -295,6 +295,13 @@ impl Default for FocusNowLimits {
     }
 }
 
+/// Whether a camera keeps its focus after a Focus now: it watches the sharpness at the centre
+/// and focuses again around where it is when it drops under the limit's (the scene moved).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct FocusNowContinuous {
+    pub enabled: bool,
+}
+
 /// Focus now of one camera: a search for the sharpest focus at the centre of the picture,
 /// on the camera's own AF statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -308,4 +315,8 @@ pub struct FocusNowStatus {
     pub last: Option<FocusNowResult>,
     /// The camera's limits, which the next run stops at.
     pub limits: FocusNowLimits,
+    /// Whether the camera keeps its focus after a run (see [`FocusNowContinuous`]).
+    pub continuous: bool,
+    /// Whether it is watching the sharpness now, to focus again when it drops.
+    pub watching: bool,
 }
