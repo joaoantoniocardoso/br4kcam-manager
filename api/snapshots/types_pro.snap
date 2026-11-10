@@ -30,6 +30,7 @@ export type FocusNowLimits = {
     estimator: FocusNowEstimator,
     close: FocusNowClose,
     certificate: FocusNowCertificate,
+    converge: boolean,
 };
 
 export type FocusNowOutcome = "focused" | "approximate" | "scene_changed" | "low_texture" | "no_peak" | "reader_missing" | "command_lost" | "focus_moved" | "stopped" | "not_available";

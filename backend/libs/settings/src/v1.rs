@@ -46,6 +46,8 @@ pub struct FocusNowLimits {
     pub close: FocusNowClose,
     #[serde(default)]
     pub certificate: FocusNowCertificate,
+    #[serde(default)]
+    pub converge: bool,
 }
 
 fn centre_zones() -> u8 {
@@ -402,6 +404,7 @@ mod tests {
             estimator: FocusNowEstimator::Midpoint,
             close: FocusNowClose::Hill,
             certificate: FocusNowCertificate::Measured,
+            converge: true,
         };
         settings.focus_now_limits.insert(Uuid::nil(), limits);
         let saved = serde_json::to_string(&settings.to_raw()).unwrap();

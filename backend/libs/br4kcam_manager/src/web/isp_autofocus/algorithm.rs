@@ -796,25 +796,56 @@ async fn search<E: Env>(
     let h_pass = h_ref;
     // The step of a hill-climbing close.
     let mut hill_step = (HILL_STEP * half_width).max(tn.min_step);
-    while !certified(stops[stops.len() - 1].1, h_ref, q_stop, resting(&seen))
-        && passes < limits.max_passes
+    // With `converge`, a search without a shape certified by its readings stops on its own
+    // convergence, not on the certificate, which still gives the verdict: at Precise in noise the
+    // bound is seldom reached, and reading on moved the close off the peak
+    // (`reports/af-estimators.md`). It goes on from its last two readings, any move.
+    let converge = limits.converge;
+    // The last peak a parabola close placed.
+    let mut placed = None;
+    while (converge
+        || !certified(
+        stops[stops.len() - 1].1,
+        h_ref,
+        q_stop,
+        resting(&seen),
+    )) && passes < limits.max_passes
         && elapsed(env) + tn.stop < f64::from(limits.max_seconds)
         // A hill-climb certified by its readings ends once its step is under the shortest: the
         // peak is bracketed, and reading on in noise only spends the time (Precise in low light
         // went from 5.2 to 8.3 s, `reports/af-estimators.md`).
-        && !(limits.close == FocusNowClose::Hill && hill_step < tn.min_step)
+        && !((converge || limits.close == FocusNowClose::Hill) && hill_step < tn.min_step)
     {
         let (ua, va, xa) = stops[stops.len() - 1];
         let pair = (stops.len() >= 2).then(|| stops[stops.len() - 2]);
         let (next, d, fresh) = match pair {
             // Two readings at one output (a step held at the window's end) place nothing. The
-            // search also climbs back from a step off the hump.
-            Some((_, vb, xb)) if valid(vb, h_ref) && xb != xa => {
+            // search also climbs back from a step off the hump, and when it converges, onto it.
+            Some((_, vb, xb)) if xb != xa && (valid(vb, h_ref) || converge && valid(va, h_ref)) => {
                 // No height beyond what it read.
-                let x0 = (limits.close == FocusNowClose::Parabola)
+                let vertex = (limits.close == FocusNowClose::Parabola)
                     .then(|| vertex(&seen, half_width))
-                    .flatten()
-                    .unwrap_or_else(|| hill(&mut hill_step, xa, va, xb, vb));
+                    .flatten();
+                // A parabola close has converged once its peak moves less than the shortest step
+                // from one reading to the next.
+                if converge
+                    && vertex
+                        .zip(placed)
+                        .is_some_and(|(x, last): (f64, f64)| (x - last).abs() < tn.min_step)
+                {
+                    break;
+                }
+                placed = vertex.or(placed);
+                let x0 = vertex.unwrap_or_else(|| {
+                    let x0 = hill(&mut hill_step, xa, va, xb, vb);
+                    // Converged, the step halved under the shortest: back onto the better of the
+                    // two, the bracket's best.
+                    if converge && hill_step < tn.min_step {
+                        xb
+                    } else {
+                        x0
+                    }
+                });
                 let fit = above(va).max(above(vb));
                 // The pair's own height cannot certify the pair: what it places wrong, it also
                 // puts lower. The higher of it and the passes' bound holds, the pair's no more
@@ -865,7 +896,7 @@ async fn search<E: Env>(
             }
         };
         let reading = stop(env, next, d, k, &tn).await?;
-        if fresh {
+        if fresh && !converge {
             // A fresh pair from there, if it still does not certify.
             stops.clear();
         }

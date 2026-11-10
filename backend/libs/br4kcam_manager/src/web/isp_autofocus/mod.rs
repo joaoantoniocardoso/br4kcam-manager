@@ -282,6 +282,7 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
                 settings::FocusNowCertificate::Measured => FocusNowCertificate::Measured,
                 settings::FocusNowCertificate::Monotone => FocusNowCertificate::Monotone,
             },
+            converge: limits.converge,
         })
 }
 
@@ -332,6 +333,7 @@ pub(crate) async fn set_limits(
                     FocusNowCertificate::Measured => settings::FocusNowCertificate::Measured,
                     FocusNowCertificate::Monotone => settings::FocusNowCertificate::Monotone,
                 },
+                converge: limits.converge,
             },
         );
         // A failed save shows in the health report; the limits still hold until a restart.

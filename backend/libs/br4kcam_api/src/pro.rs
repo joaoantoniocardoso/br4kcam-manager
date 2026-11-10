@@ -321,6 +321,12 @@ pub struct FocusNowLimits {
     /// `measured`.
     #[serde(default)]
     pub certificate: FocusNowCertificate,
+    /// Whether a close without a shape (`parabola`, `hill`) certified by its readings stops on its
+    /// own convergence only, rather than also once its certificate holds; the verdict is the
+    /// certificate's either way. Absent from older clients: also once it holds. The desk's bridge
+    /// showed it losing 9 to 13 points of success (`reports/af-estimators.md`): keep it off.
+    #[serde(default)]
+    pub converge: bool,
 }
 
 /// How a Focus now places the peak of the hump its fine ramp crossed.
@@ -377,6 +383,7 @@ impl Default for FocusNowLimits {
             estimator: FocusNowEstimator::default(),
             close: FocusNowClose::default(),
             certificate: FocusNowCertificate::default(),
+            converge: false,
         }
     }
 }
