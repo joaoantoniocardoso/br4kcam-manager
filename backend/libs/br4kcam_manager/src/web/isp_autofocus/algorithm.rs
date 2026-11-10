@@ -815,6 +815,11 @@ async fn search<E: Env>(
         // peak is bracketed, and reading on in noise only spends the time (Precise in low light
         // went from 5.2 to 8.3 s, `reports/af-estimators.md`).
         && !((converge || limits.close == FocusNowClose::Hill) && hill_step < tn.min_step)
+        // A close without a shape certified by its readings also ends once its reading, at its
+        // upper bound, reaches the passes' height: nothing sharper is there to find. It leaves
+        // the verdict to the certificate (`reports/af-estimators.md`: +1 to +2 points, +3 to +4
+        // at Precise in low light, as honest).
+        && !(!converge && above(stops[stops.len() - 1].1) + CONFIDENCE * reading_noise >= h_pass)
     {
         let (ua, va, xa) = stops[stops.len() - 1];
         let pair = (stops.len() >= 2).then(|| stops[stops.len() - 2]);
