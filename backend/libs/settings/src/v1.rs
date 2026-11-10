@@ -14,6 +14,9 @@ pub struct SettingsDataV1 {
     /// What each camera's Focus now stops at. Absent from older files.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub focus_now_limits: IndexMap<Uuid, FocusNowLimits>,
+    /// What each camera's Focus now learned from its certified runs. Absent from older files.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub focus_now_learned: IndexMap<Uuid, FocusNowLearned>,
     // todo: pub image: IndexMap<Uuid, CameraImageSettings>,
 }
 
@@ -35,6 +38,15 @@ pub struct FocusNowLimits {
 
 fn centre_zones() -> u8 {
     3
+}
+
+/// The biases a camera's certified Focus now runs measured, µs, newest last: its coarse pass's,
+/// falling and rising, and its ramp's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FocusNowLearned {
+    pub falling: Vec<f64>,
+    pub rising: Vec<f64>,
+    pub ramp: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,6 +217,7 @@ impl From<SettingsDataV0> for SettingsDataV1 {
             actuators: IndexMap::default(),
             program_max_exposure: IndexMap::default(),
             focus_now_limits: IndexMap::default(),
+            focus_now_learned: IndexMap::default(),
         }
     }
 }
@@ -224,6 +237,10 @@ impl SettingsDataImpl for SettingsDataV1 {
 
     fn get_focus_now_limits_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLimits> {
         &mut self.focus_now_limits
+    }
+
+    fn get_focus_now_learned_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLearned> {
+        &mut self.focus_now_learned
     }
 
     fn to_raw(&self) -> RawSettingsData {

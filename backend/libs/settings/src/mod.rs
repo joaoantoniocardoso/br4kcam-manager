@@ -27,6 +27,7 @@ pub trait SettingsDataImpl: std::fmt::Debug + Send + Sync {
     fn get_actuators_mut(&mut self) -> &mut IndexMap<Uuid, CameraActuatorsSettings>;
     fn get_program_max_exposure_mut(&mut self) -> &mut IndexMap<Uuid, u32>;
     fn get_focus_now_limits_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLimits>;
+    fn get_focus_now_learned_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLearned>;
 
     fn to_raw(&self) -> RawSettingsData;
 }
