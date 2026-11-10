@@ -2565,4 +2565,36 @@ mod tests {
             }
         }
     }
+
+    /// Readings at rest of a hump peaking at 1100 µs, of scale 3.4 µs, 3 % noise.
+    fn readings(rng: &mut Rng, shape: f64, skew: f64) -> impl FnMut(f64) -> f64 + '_ {
+        move |x| 100.0 * generalized(x - 1100.0, 3.4, shape, skew) * (1.0 + rng.normal(0.03))
+    }
+
+    #[test]
+    fn climbs_onto_the_peak() {
+        // From a landing up to 2 sd off the peak, a step down, then the hill-climb on readings
+        // at rest: within 1.5 µs of the peak after 8 readings, on every shape.
+        for shape in [1.5, 2.0, 3.0, 4.0] {
+            for skew in [0.0, 0.2] {
+                for (seed, start) in [(1, 1093.0), (2, 1097.0), (3, 1103.0), (4, 1107.0)] {
+                    let mut rng = Rng(seed);
+                    let mut read = readings(&mut rng, shape, skew);
+                    let mut step = HILL_STEP * HALF_WIDTH;
+                    let mut seen = vec![(start, read(start)), (start - step, read(start - step))];
+                    for _ in 0..6 {
+                        let (xa, va) = seen[seen.len() - 1];
+                        let (xb, vb) = seen[seen.len() - 2];
+                        let x = hill(&mut step, xa, va, xb, vb);
+                        seen.push((x, read(x)));
+                    }
+                    let best = seen.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
+                    assert!(
+                        (best - 1100.0).abs() < 1.5,
+                        "p {shape} skew {skew} from {start}: {seen:?}"
+                    );
+                }
+            }
+        }
+    }
 }
