@@ -26,8 +26,8 @@ use autopilot::{
     api::{Action as AutopilotAction, ActuatorsConfig, ActuatorsControl, FocusZoomPoints},
 };
 use br4kcam_api::pro::{
-    FocusNowContinuous, FocusNowLimits, FocusNowOutcome, FocusNowPhase, FocusNowResult,
-    FocusNowStatus,
+    FocusNowContinuous, FocusNowFallback, FocusNowLimits, FocusNowOutcome, FocusNowPhase,
+    FocusNowResult, FocusNowStatus,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
@@ -35,8 +35,8 @@ use uuid::Uuid;
 
 use crate::web::control_bridge::{ControlError, UNKNOWN_CAMERA};
 use algorithm::{
-    CONSTANTS, Constants, Env, Floor, Frame, LANDED_RATIO, Landing, READER_TIMEOUT, STILL_OVER_V2,
-    Seed,
+    CONSTANTS, Constants, Env, FallBack, Floor, Frame, LANDED_RATIO, Landing, READER_TIMEOUT,
+    STILL_OVER_V2, Seed,
 };
 
 /// How long the first reported outputs may take, at the stream's 10 Hz.
@@ -45,6 +45,8 @@ const FIRST_OUTPUTS: Duration = Duration::from_secs(2);
 const FIRST_FRAMES: Duration = Duration::from_millis(500);
 /// How long a status check or a wait of a run keeps the statistics coming.
 const WANTED: Duration = Duration::from_secs(3);
+/// How long the start's sharpness is read at rest, s: 6 frames.
+const START_READ: f64 = 0.2;
 /// How often a run renews its focus lease: a third of it, so one lost renewal does not end it.
 const LEASE_RENEWAL: Duration = Duration::from_millis(500);
 
@@ -520,6 +522,17 @@ async fn prepare(
     };
     let window = Window::of(&config, start.zoom)
         .ok_or_else(|| not_available("The camera's focus calibration is not set up".into()))?;
+    // The start's sharpness at rest, before anything moves: what a failed run has to beat.
+    let mut start_v2 = None;
+    for _ in 0..10 {
+        let now = afstat::seconds(Instant::now());
+        let frames = afstat::frames(address, now - START_READ, f64::INFINITY);
+        if frames.len() >= 5 {
+            start_v2 = Some(frames.iter().map(|frame| frame.v2).sum::<f64>() / frames.len() as f64);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // A release first: a renewal still on its way when the last run released its lease takes
     // it again, and the user moving the focus then leaves holds refused until a release.
     let _ = autopilot::focus_lease(camera_uuid, false, false).await;
@@ -551,6 +564,9 @@ async fn prepare(
         commands,
         failed,
         renewal,
+        start_v2,
+        best: None,
+        estimate: None,
     })
 }
 
@@ -608,78 +624,7 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
         None => algorithm::run(&mut env, &k, &limits).instrument(span).await,
     };
     let again = if seed.is_some() { "again " } else { "" };
-    let mut watch_from = None;
-    let result = match landed {
-        Ok(landing) => {
-            let focus = env.window.percent(env.window.input_for(landing.u));
-            let ratio = Some(landing.ratio as f32);
-            let sharpness = Some(landing.sharpness as f32);
-            // Focused when the sharpness it reports (90 % confidence) is the one asked, so the
-            // verdict and the number shown agree (`reports/isp-af-r5.md`, round 6).
-            let focused = landing.sharpness >= f64::from(limits.sharpness);
-            // Under the pass's peak and short of the sharpness asked: a Fast landing at its limit
-            // reads 0.42 of the peak.
-            if !focused && landing.ratio < LANDED_RATIO {
-                let message = format!(
-                    "Landed, but the centre is only {:.0} % as sharp as the peak the search saw: the scene changed or the landing missed",
-                    100.0 * landing.ratio
-                );
-                FocusNowResult {
-                    ratio,
-                    focus: Some(focus),
-                    sharpness,
-                    ..result(FocusNowOutcome::SceneChanged, message, started, None)
-                }
-            } else {
-                // Only a certified landing is the truth the passes' biases are measured against.
-                if landing.certified {
-                    learn(camera_uuid, &landing);
-                    save_learned(camera_uuid).await;
-                }
-                // The script's input takes the landing, so the focus slider shows it and the
-                // zoom correlation keeps it; its output is the one landed on.
-                if let Err(error) = autopilot::send_focus(camera_uuid, focus).await {
-                    warn!("Focus now: focus {focus} % not sent: {error:#}");
-                }
-                let (outcome, message) = if focused {
-                    let message = format!(
-                        "Focused {again}in {:.1} s: at least {:.0} % as sharp as the best",
-                        landing.seconds,
-                        100.0 * landing.sharpness
-                    );
-                    (FocusNowOutcome::Focused, message)
-                } else {
-                    let message = format!(
-                        "Approximate {again}in {:.1} s: at least {:.0} % as sharp as the best ({:.0} % asked)",
-                        landing.seconds,
-                        100.0 * landing.sharpness,
-                        100.0 * limits.sharpness
-                    );
-                    (FocusNowOutcome::Approximate, message)
-                };
-                watch_from = Some(landing);
-                FocusNowResult {
-                    ratio,
-                    focus: Some(focus),
-                    sharpness,
-                    ..result(outcome, message, started, None)
-                }
-            }
-        }
-        Err(outcome) => {
-            let restore = !matches!(
-                outcome,
-                FocusNowOutcome::FocusMoved | FocusNowOutcome::Stopped
-            );
-            let mut focus = None;
-            if restore {
-                // Back where it started: what the search left is no better.
-                env.send(f64::from(env.start.focus));
-                focus = Some(env.window.percent(env.window.input_for(env.last_sent)));
-            }
-            result(outcome, message_of(outcome).into(), started, focus)
-        }
-    };
+    let (result, watch_from) = conclude(&mut env, &k, &limits, landed, again, started).await;
     info!("Focus now of {camera_uuid}: {}", result.message);
     let address = env.address;
     let failed_refocus = seed.filter(|_| watch_from.is_none());
@@ -939,6 +884,158 @@ fn result(
     }
 }
 
+/// What a run's end needs beyond the procedure's [`Env`]. The live run's is [`LiveEnv`]; the
+/// desk's simulator bridge has its own.
+pub(crate) trait Ending: Env {
+    /// The focus slider's percent that gives an output.
+    fn percent(&self, u: f64) -> f32;
+    /// The output the run started from, and its v2 at rest, when read.
+    fn start_output(&self) -> f64;
+    fn start_reading(&self) -> Option<f64>;
+    /// Where a failed run falls back on, from its notes.
+    fn best_measured(&self) -> Option<f64>;
+    /// Shows a focus on the slider, the landing's or the fall-back's.
+    async fn show(&mut self, percent: f32);
+    /// Learns the biases of a certified landing.
+    async fn learned(&mut self, landing: &Landing);
+}
+
+/// The verdict on a run's landing, or its fall-back after a failure: the result, and the landing
+/// a continuous watch starts from.
+async fn conclude<E: Ending>(
+    env: &mut E,
+    k: &Constants,
+    limits: &FocusNowLimits,
+    landed: Result<Landing, FocusNowOutcome>,
+    again: &str,
+    started: Instant,
+) -> (FocusNowResult, Option<Landing>) {
+    let mut watch_from = None;
+    let result = match landed {
+        Ok(landing) => {
+            let focus = env.percent(landing.u);
+            let ratio = Some(landing.ratio as f32);
+            let sharpness = Some(landing.sharpness as f32);
+            // Focused when the sharpness it reports (90 % confidence) is the one asked, so the
+            // verdict and the number shown agree (`reports/isp-af-r5.md`, round 6).
+            let focused = landing.sharpness >= f64::from(limits.sharpness);
+            // Under the pass's peak and short of the sharpness asked: a Fast landing at its limit
+            // reads 0.42 of the peak.
+            if !focused && landing.ratio < LANDED_RATIO {
+                let message = format!(
+                    "Landed, but the centre is only {:.0} % as sharp as the peak the search saw: the scene changed or the landing missed",
+                    100.0 * landing.ratio
+                );
+                FocusNowResult {
+                    ratio,
+                    focus: Some(focus),
+                    sharpness,
+                    ..result(FocusNowOutcome::SceneChanged, message, started, None)
+                }
+            } else {
+                // Only a certified landing is the truth the passes' biases are measured against.
+                if landing.certified {
+                    env.learned(&landing).await;
+                }
+                // The script's input takes the landing, so the focus slider shows it and the
+                // zoom correlation keeps it; its output is the one landed on.
+                env.show(focus).await;
+                let (outcome, message) = if focused {
+                    let message = format!(
+                        "Focused {again}in {:.1} s: at least {:.0} % as sharp as the best",
+                        landing.seconds,
+                        100.0 * landing.sharpness
+                    );
+                    (FocusNowOutcome::Focused, message)
+                } else if landing.sharpness > 0.0 {
+                    let message = format!(
+                        "Approximate {again}in {:.1} s: at least {:.0} % as sharp as the best ({:.0} % asked)",
+                        landing.seconds,
+                        100.0 * landing.sharpness,
+                        100.0 * limits.sharpness
+                    );
+                    (FocusNowOutcome::Approximate, message)
+                } else {
+                    // Sharpness 0 is no claim: the run measured no peak to compare with.
+                    let message = format!(
+                        "Approximate {again}in {:.1} s: how sharp it is could not be measured ({:.0} % asked)",
+                        landing.seconds,
+                        100.0 * limits.sharpness
+                    );
+                    (FocusNowOutcome::Approximate, message)
+                };
+                watch_from = Some(landing);
+                FocusNowResult {
+                    ratio,
+                    focus: Some(focus),
+                    sharpness,
+                    ..result(outcome, message, started, None)
+                }
+            }
+        }
+        Err(outcome) => {
+            let restore = !matches!(
+                outcome,
+                FocusNowOutcome::FocusMoved | FocusNowOutcome::Stopped
+            );
+            let mut focus = None;
+            let mut message = message_of(outcome).to_string();
+            let mut fallback = None;
+            if restore {
+                // The sharpest position it measured, when that beats the start at rest; else back
+                // where it started, never less sharp (the user's ask, `reports/isp-af-r5.md`,
+                // round 8). Without the start's reading, the start's output.
+                let start = env.start_output();
+                let best = keeps_looking(outcome)
+                    .then(|| env.best_measured())
+                    .flatten();
+                // Within the run's time limit.
+                let until =
+                    env.now() + f64::from(limits.max_seconds) - started.elapsed().as_secs_f64();
+                let fell = match env.start_reading() {
+                    Some(_) => algorithm::fall_back(env, k, limits, best, start, until)
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                if let Some(FallBack::Best(reading, start_reading)) = fell {
+                    let percent = env.percent(env.last_sent());
+                    env.show(percent).await;
+                    focus = Some(percent);
+                    message = format!(
+                        "{message}: kept the sharpest position found ({reading:.0} against {start_reading:.0} where it started)"
+                    );
+                    fallback = Some(FocusNowFallback::KeptBest);
+                } else {
+                    if fell.is_none() {
+                        env.send(start);
+                    }
+                    focus = Some(env.percent(env.last_sent()));
+                    message = if best.is_some() && fell.is_some() {
+                        format!("{message}: restored the start, nothing sharper found")
+                    } else {
+                        format!("{message}: restored the start")
+                    };
+                    fallback = Some(FocusNowFallback::RestoredStart);
+                }
+            }
+            FocusNowResult {
+                fallback,
+                ..result(outcome, message, started, focus)
+            }
+        }
+    };
+    (result, watch_from)
+}
+
+/// Failures after which the run still measured something worth falling back on.
+fn keeps_looking(outcome: FocusNowOutcome) -> bool {
+    matches!(
+        outcome,
+        FocusNowOutcome::NoPeak | FocusNowOutcome::LowTexture | FocusNowOutcome::SceneChanged
+    )
+}
+
 fn finish(camera_uuid: Uuid, result: FocusNowResult) {
     let mut runs = runs();
     let run = runs.entry(camera_uuid).or_default();
@@ -1092,6 +1189,53 @@ struct LiveEnv {
     failed: Arc<AtomicBool>,
     /// Renews the focus lease while the run lives.
     renewal: JoinHandle<()>,
+    /// The centre's v2 at rest before the first move, and the run's notes: its best reading at
+    /// rest `(µs, v2)` and where its passes last placed the peak.
+    start_v2: Option<f64>,
+    best: Option<(f64, f64)>,
+    estimate: Option<f64>,
+}
+
+impl LiveEnv {
+    /// Where to fall back after a failure: the best reading at rest when it beats the start's,
+    /// else where the passes placed the peak.
+    fn best_measured(&self) -> Option<f64> {
+        self.best
+            .filter(|&(_, v2)| self.start_v2.is_some_and(|start| v2 > start))
+            .map(|(u, _)| u)
+            .or(self.estimate)
+    }
+}
+
+impl Ending for LiveEnv {
+    fn percent(&self, u: f64) -> f32 {
+        self.window.percent(self.window.input_for(u))
+    }
+
+    fn start_output(&self) -> f64 {
+        f64::from(self.start.focus)
+    }
+
+    fn start_reading(&self) -> Option<f64> {
+        self.start_v2
+    }
+
+    fn best_measured(&self) -> Option<f64> {
+        LiveEnv::best_measured(self)
+    }
+
+    async fn show(&mut self, percent: f32) {
+        // The script's input takes it, so the focus slider shows it and the zoom correlation
+        // keeps it.
+        if let Err(error) = autopilot::send_focus(self.camera_uuid, percent).await {
+            warn!("Focus now: focus {percent} % not sent: {error:#}");
+        }
+    }
+
+    async fn learned(&mut self, landing: &Landing) {
+        learn(self.camera_uuid, landing);
+        save_learned(self.camera_uuid).await;
+    }
 }
 
 impl Drop for LiveEnv {
@@ -1194,6 +1338,14 @@ impl Env for LiveEnv {
     fn phase(&mut self, phase: FocusNowPhase) {
         if let Some(run) = runs().get_mut(&self.camera_uuid) {
             run.phase = Some(phase);
+        }
+    }
+
+    fn note(&mut self, u: f64, v2: Option<f64>) {
+        match v2 {
+            Some(v2) if self.best.is_none_or(|(_, best)| v2 > best) => self.best = Some((u, v2)),
+            Some(_) => {}
+            None => self.estimate = Some(u),
         }
     }
 }
