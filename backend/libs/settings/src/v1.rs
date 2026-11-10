@@ -311,4 +311,36 @@ mod tests {
         };
         assert_eq!(reloaded.program_max_exposure.get(&Uuid::nil()), Some(&250));
     }
+
+    #[test]
+    fn focus_now_limits_survive_a_reload() {
+        let RawSettingsData::V1(mut settings) =
+            serde_json::from_str::<RawSettingsData>(SETTINGS_WITHOUT_LENS).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        // Files from before them load without any and save without the key.
+        assert!(settings.focus_now_limits.is_empty());
+        assert!(
+            !serde_json::to_string(&settings.to_raw())
+                .unwrap()
+                .contains("focus_now_limits")
+        );
+        let limits = FocusNowLimits {
+            sharpness: 0.9,
+            max_seconds: 12.0,
+            max_passes: 10,
+            centre_zones: 5,
+            retry_zones: 17,
+            retry_first: true,
+        };
+        settings.focus_now_limits.insert(Uuid::nil(), limits);
+        let saved = serde_json::to_string(&settings.to_raw()).unwrap();
+        let RawSettingsData::V1(reloaded) =
+            serde_json::from_str::<RawSettingsData>(&saved).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        assert_eq!(reloaded.focus_now_limits.get(&Uuid::nil()), Some(&limits));
+    }
 }
