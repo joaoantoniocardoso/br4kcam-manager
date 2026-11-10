@@ -752,7 +752,7 @@ async fn search<E: Env>(
     // over their root count): v2's sharpness against what the run measured, with no shape and no
     // distance. It bounds the still's wherever the still's hump is no narrower than v2's.
     let measured =
-        |v: f64, h: f64| (above(v) - CONFIDENCE * floor.noise / f64::from(tn.read).sqrt()) / h;
+        |v: f64, h: f64| (above(v) - CONFIDENCE * floor.of_mean(floor.noise, tn.read)) / h;
     // What the readings at rest `seen` bound the peak's height by: the monotone certificate's
     // bound ([`monotone`]), else the highest of them.
     let resting = |seen: &[(f64, f64)]| {
@@ -788,7 +788,7 @@ async fn search<E: Env>(
     // A reading is the mean of its frames: its noise is the frames' over their root count. With
     // the frames' own noise a weak hump (6 sd of a frame high) has no valid reading 2 µs off its
     // top (`reports/isp-af-r5.md`, round 7).
-    let reading_noise = floor.noise / f64::from(tn.read).sqrt();
+    let reading_noise = floor.of_mean(floor.noise, tn.read);
     let valid = |v: f64, h: f64| above(v) >= (3.0 * reading_noise).max(0.03 * h);
     // Where the passes placed the peak, and how many probes looked for it off the hump.
     let (mu_pass, mut probes) = (mu, 0u32);
@@ -1273,6 +1273,8 @@ async fn settled<E: Env>(
 pub(crate) struct Floor {
     level: f64,
     noise: f64,
+    /// The lag-1 correlation of successive frames' noise.
+    rho: f64,
 }
 
 impl Floor {
@@ -1332,7 +1334,15 @@ impl Floor {
         Self {
             level,
             noise: (rms / (2.0 * (1.0 - rho)).sqrt()).max(sd),
+            rho,
         }
+    }
+
+    /// The noise of a mean of `n` successive frames of noise `noise`: theirs over √n when they are
+    /// independent, √((1 + ρ) / (1 − ρ)) times that when they correlate, a frame's at most.
+    fn of_mean(&self, noise: f64, n: u8) -> f64 {
+        let n = f64::from(n);
+        noise * ((1.0 + self.rho) / ((1.0 - self.rho) * n)).min(1.0).sqrt()
     }
 
     /// Its level.
