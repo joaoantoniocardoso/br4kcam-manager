@@ -15,8 +15,8 @@ use axum::{
     routing::{get, post},
 };
 use br4kcam_api::pro::{
-    Aperture, ExposureMode, ExposureWarning, FocusNowLimits, FullGain, MaxIso, ProCapabilities,
-    ProSettings, ProState, Range, WhiteBalance, WhiteBalanceScene,
+    Aperture, ExposureMode, ExposureWarning, FocusNowContinuous, FocusNowLimits, FullGain, MaxIso,
+    ProCapabilities, ProSettings, ProState, Range, WhiteBalance, WhiteBalanceScene,
 };
 use br4kcam_commands::{
     Action as CameraAction, CameraControl,
@@ -199,6 +199,10 @@ pub fn router() -> Router {
             "/{camera_uuid}/focus_now/limits",
             post(http_focus_now_limits),
         )
+        .route(
+            "/{camera_uuid}/focus_now/continuous",
+            post(http_focus_now_continuous),
+        )
         .route("/{camera_uuid}/focus_now/stop", post(http_focus_now_stop))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -242,6 +246,14 @@ pub(crate) async fn ws_request(
                 .map(|status| (200, json!(status))),
             Err(error) => Err(bad_request(format!("{error}"))),
         },
+        ("POST", "focus_now/continuous") => {
+            match serde_json::from_value(body.unwrap_or(Value::Null)) {
+                Ok(continuous) => isp_autofocus::set_continuous(camera_uuid, continuous)
+                    .await
+                    .map(|status| (200, json!(status))),
+                Err(error) => Err(bad_request(format!("{error}"))),
+            }
+        }
         ("POST", "focus_now/stop") => isp_autofocus::stop(camera_uuid)
             .await
             .map(|status| (200, json!(status))),
@@ -305,6 +317,14 @@ async fn http_focus_now_limits(
     Json(limits): Json<FocusNowLimits>,
 ) -> Response {
     respond(isp_autofocus::set_limits(camera_uuid, limits).await)
+}
+
+#[instrument(level = "debug")]
+async fn http_focus_now_continuous(
+    Path(camera_uuid): Path<Uuid>,
+    Json(continuous): Json<FocusNowContinuous>,
+) -> Response {
+    respond(isp_autofocus::set_continuous(camera_uuid, continuous).await)
 }
 
 #[instrument(level = "debug")]
