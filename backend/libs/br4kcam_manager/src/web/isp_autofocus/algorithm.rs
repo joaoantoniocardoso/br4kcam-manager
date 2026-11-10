@@ -791,7 +791,10 @@ async fn search<E: Env>(
     } else {
         floor.noise
     };
-    let measured = |v: f64, h: f64| (above(v) - CONFIDENCE * floor.of_mean(noise, tn.read)) / h;
+    // Over the peak's height at its upper bound: the passes measured it on frames of that noise.
+    let measured = |v: f64, h: f64| {
+        (above(v) - CONFIDENCE * floor.of_mean(noise, tn.read)) / (h + CONFIDENCE * floor.noise)
+    };
     // What the readings at rest `seen` bound the peak's height by: the monotone certificate's
     // bound ([`monotone`]), else the highest of them.
     let resting = |seen: &[(f64, f64)]| {
