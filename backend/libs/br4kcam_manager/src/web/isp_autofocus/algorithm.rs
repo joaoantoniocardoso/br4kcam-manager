@@ -78,6 +78,10 @@ pub(crate) struct Constants {
     /// ([`Pass::level`]), rather than the pass's: a landing off the peak on the pedestal does not
     /// certify (false "focused" 14 to 16 % at Balanced, 1/2000 s ISO 1600, on the desk's bridge).
     pub local_floor: bool,
+    /// The measured certificate takes a reading's noise as the spread of the pass about its
+    /// median, pedestal included, when larger ([`Floor::spread`]): in the real dark it said
+    /// "focused" falsely 1.2 % of the time without, 0.3 % with (the desk's bridge, round 10).
+    pub split_noise: bool,
 }
 
 /// The constants `afalgo.py` ran live with on camera .10 (§5.3), its coarse biases measured again.
@@ -101,6 +105,7 @@ pub(crate) const CONSTANTS: Constants = Constants {
     coarse_bias_r: 25.0,
     w: 3.4,
     local_floor: true,
+    split_noise: true,
 };
 
 /// The statistic's frame period, s.
@@ -781,8 +786,12 @@ async fn search<E: Env>(
     // A reading over the height `h` of the peak, at the reading's lower bound (its frames' noise
     // over their root count): v2's sharpness against what the run measured, with no shape and no
     // distance. It bounds the still's wherever the still's hump is no narrower than v2's.
-    let measured =
-        |v: f64, h: f64| (above(v) - CONFIDENCE * floor.of_mean(floor.noise, tn.read)) / h;
+    let noise = if k.split_noise {
+        floor.noise.max(floor.spread)
+    } else {
+        floor.noise
+    };
+    let measured = |v: f64, h: f64| (above(v) - CONFIDENCE * floor.of_mean(noise, tn.read)) / h;
     // What the readings at rest `seen` bound the peak's height by: the monotone certificate's
     // bound ([`monotone`]), else the highest of them.
     let resting = |seen: &[(f64, f64)]| {
@@ -1330,6 +1339,9 @@ async fn settled<E: Env>(
 pub(crate) struct Floor {
     level: f64,
     noise: f64,
+    /// The frames' spread about the level, 1.4826 times their median absolute deviation from
+    /// it: the slow signal included.
+    spread: f64,
     /// The lag-1 correlation of successive frames' noise.
     rho: f64,
 }
@@ -1362,6 +1374,13 @@ impl Floor {
             .filter(|d| d.abs() <= 3.0 * deviation)
             .collect();
         let rms = (kept.iter().map(|d| d * d).sum::<f64>() / kept.len().max(1) as f64).sqrt();
+        let spread = 1.4826
+            * median(
+                frames
+                    .iter()
+                    .map(|frame| (frame.v2 - level).abs())
+                    .collect(),
+            );
         let (sd, rho) = if rest.len() >= FLOOR_FRAMES {
             let n = rest.len() as f64;
             let mean = rest.iter().map(|frame| frame.v2).sum::<f64>() / n;
@@ -1391,6 +1410,7 @@ impl Floor {
         Self {
             level,
             noise: (rms / (2.0 * (1.0 - rho)).sqrt()).max(sd),
+            spread,
             rho,
         }
     }
