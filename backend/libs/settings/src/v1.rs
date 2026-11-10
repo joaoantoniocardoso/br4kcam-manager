@@ -400,4 +400,28 @@ mod tests {
         };
         assert_eq!(reloaded.focus_now_learned.get(&Uuid::nil()), Some(&learned));
     }
+
+    #[test]
+    fn focus_now_continuous_survives_a_reload() {
+        let RawSettingsData::V1(mut settings) =
+            serde_json::from_str::<RawSettingsData>(SETTINGS_WITHOUT_LENS).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        // Files from before it load without any and save without the key.
+        assert!(settings.focus_now_continuous.is_empty());
+        assert!(
+            !serde_json::to_string(&settings.to_raw())
+                .unwrap()
+                .contains("focus_now_continuous")
+        );
+        settings.focus_now_continuous.insert(Uuid::nil(), true);
+        let saved = serde_json::to_string(&settings.to_raw()).unwrap();
+        let RawSettingsData::V1(reloaded) =
+            serde_json::from_str::<RawSettingsData>(&saved).unwrap()
+        else {
+            panic!("expected V1 settings");
+        };
+        assert_eq!(reloaded.focus_now_continuous.get(&Uuid::nil()), Some(&true));
+    }
 }
