@@ -2865,4 +2865,35 @@ mod tests {
         }
         assert!(failed >= 3, "{failed} failed runs");
     }
+
+    #[test]
+    fn measures_the_floor_noise_without_the_slow_signal() {
+        // A coarse pass at 1/2000 s ISO 1600 (live on t9c, the night of 2026-11-10): frame noise
+        // sd 20 on a broad pedestal of the scene rising 50 to 400 and a hump of 300 over three
+        // frames. The noise is the frames', whatever lies under them; the deviation from their
+        // median read it 52 to 68.
+        for seed in 0..10 {
+            let mut rng = Rng(seed);
+            let frames: Vec<Frame> = (0..60)
+                .map(|n| {
+                    let pedestal = 50.0 + 350.0 * f64::from(n) / 59.0;
+                    let hump = 300.0 * (-0.5 * ((f64::from(n) - 40.0) / 1.0).powi(2)).exp();
+                    Frame {
+                        t: f64::from(n) * FRAME,
+                        v2: pedestal + hump + rng.normal(20.0),
+                        v1: 0.0,
+                    }
+                })
+                .collect();
+            let floor = Floor::of(&frames, &[]);
+            let mut deviations: Vec<f64> = frames
+                .iter()
+                .map(|frame| (frame.v2 - floor.level).abs())
+                .collect();
+            deviations.sort_by(f64::total_cmp);
+            let from_median = 1.4826 * deviations[deviations.len() / 2];
+            assert!((floor.noise - 20.0).abs() < 5.0, "{seed}: {floor:?}");
+            assert!(from_median > 60.0, "{seed}: {from_median}");
+        }
+    }
 }
