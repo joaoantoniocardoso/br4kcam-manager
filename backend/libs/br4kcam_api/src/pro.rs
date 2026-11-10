@@ -327,6 +327,8 @@ pub struct FocusNowLimits {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowEstimator {
+    /// A least-squares parabola on the statistic itself around its maximum.
+    Quadratic,
     /// The parabola through the maximum and its two neighbours, on the statistic itself.
     #[default]
     Parabola,

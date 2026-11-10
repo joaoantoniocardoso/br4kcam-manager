@@ -1117,6 +1117,7 @@ async fn ramp<E: Env>(
     let (t_pk, height) = match estimator {
         FocusNowEstimator::Midpoint => midpoint(&frames, i, floor.level),
         FocusNowEstimator::Parabola => parabola(&frames, i, floor.level),
+        FocusNowEstimator::Quadratic => quadratic(&frames, i, floor.level),
     };
     let reported = env.outputs(tr0 - 1.0, env.now());
     // A ramp step came late, stalling the ramp, when an output is reported still on a command
@@ -1453,6 +1454,41 @@ fn parabola(frames: &[Frame], i: usize, level: f64) -> (f64, f64) {
         }
     }
     (frames[i].t, height)
+}
+
+/// The peak of the hump at frame `i` above `level`: the vertex of the least-squares parabola
+/// through its frames over 0.4 of its top within 0.4 s, as (time, the vertex's height); with fewer
+/// than four or no top within 0.3 s, [`parabola`]'s. Least squares (Legendre 1805) of a local
+/// polynomial, the smoothing of Savitzky & Golay (1964, Anal. Chem. 36, 1627). Unweighted, on v2
+/// itself: a polynomial in the values, not in their log.
+fn quadratic(frames: &[Frame], i: usize, level: f64) -> (f64, f64) {
+    let top = frames[i];
+    let height = top.v2 - level;
+    let points: Vec<(f64, f64)> = frames
+        .iter()
+        .filter(|frame| frame.v2 - level >= 0.4 * height && (frame.t - top.t).abs() < 0.4)
+        .map(|frame| (frame.t - top.t, frame.v2 - level))
+        .collect();
+    if points.len() >= 4 {
+        // The normal equations of y = a + b x + c x², by Cramer's rule.
+        let s = |p: i32| points.iter().map(|&(x, _)| x.powi(p)).sum::<f64>();
+        let r = |p: i32| points.iter().map(|&(x, y)| y * x.powi(p)).sum::<f64>();
+        let det = |m: [[f64; 3]; 3]| {
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        };
+        let (s0, s1, s2, s3, s4, r0, r1, r2) = (s(0), s(1), s(2), s(3), s(4), r(0), r(1), r(2));
+        let d = det([[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]]);
+        let a = det([[r0, s1, s2], [r1, s2, s3], [r2, s3, s4]]) / d;
+        let b = det([[s0, r0, s2], [s1, r1, s3], [s2, r2, s4]]) / d;
+        let c = det([[s0, s1, r0], [s1, s2, r1], [s2, s3, r2]]) / d;
+        let x0 = -b / (2.0 * c);
+        if c < 0.0 && x0.abs() < 0.3 {
+            return (top.t + x0, a - b * b / (4.0 * c));
+        }
+    }
+    parabola(frames, i, level)
 }
 
 /// When the hump at frame `i` crosses half its height above `level` before and after it, linear
