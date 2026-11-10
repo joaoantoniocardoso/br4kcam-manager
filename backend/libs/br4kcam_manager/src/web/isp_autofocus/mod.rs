@@ -68,10 +68,10 @@ pub(crate) fn start_listening() {
 pub(crate) async fn status(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlError> {
     let address = address(camera_uuid).await?;
     reader_answers(address).await;
-    Ok(status_of(camera_uuid, address))
+    Ok(status_of(camera_uuid, address, limits(camera_uuid).await))
 }
 
-fn status_of(camera_uuid: Uuid, address: Ipv4Addr) -> FocusNowStatus {
+fn status_of(camera_uuid: Uuid, address: Ipv4Addr, limits: FocusNowLimits) -> FocusNowStatus {
     let runs = runs();
     let run = runs.get(&camera_uuid);
     FocusNowStatus {
@@ -79,10 +79,68 @@ fn status_of(camera_uuid: Uuid, address: Ipv4Addr) -> FocusNowStatus {
         running: run.is_some_and(|run| run.running),
         phase: run.and_then(|run| run.phase),
         last: run.and_then(|run| run.last.clone()),
-        limits: FocusNowLimits::default(),
+        limits,
         continuous: false,
         watching: false,
     }
+}
+
+/// The camera's saved limits, or the defaults.
+async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
+    let Some(manager) = settings::MANAGER.get() else {
+        return FocusNowLimits::default();
+    };
+    let mut manager = manager.write().await;
+    manager
+        .settings
+        .get_focus_now_limits_mut()
+        .get(&camera_uuid)
+        .map_or_else(FocusNowLimits::default, |limits| FocusNowLimits {
+            sharpness: limits.sharpness,
+            max_seconds: limits.max_seconds,
+            max_passes: limits.max_passes,
+            centre_zones: limits.centre_zones,
+            retry_zones: limits.retry_zones,
+            retry_first: limits.retry_first,
+        })
+}
+
+/// Saves the limits the camera's next runs stop at, or refuses ones out of their ranges.
+pub(crate) async fn set_limits(
+    camera_uuid: Uuid,
+    limits: FocusNowLimits,
+) -> Result<FocusNowStatus, ControlError> {
+    let address = address(camera_uuid).await?;
+    if !(0.3..=0.95).contains(&limits.sharpness)
+        || !(4.0..=30.0).contains(&limits.max_seconds)
+        || !(3..=20).contains(&limits.max_passes)
+    {
+        return Err(ControlError {
+            status: 400,
+            message:
+                "Focus now limits: sharpness 0.3 to 0.95, max_seconds 4 to 30, max_passes 3 to 20"
+                    .into(),
+        });
+    }
+    if let Some(manager) = settings::MANAGER.get() {
+        let stored = &mut manager.write().await.settings;
+        stored.get_focus_now_limits_mut().insert(
+            camera_uuid,
+            settings::FocusNowLimits {
+                sharpness: limits.sharpness,
+                max_seconds: limits.max_seconds,
+                max_passes: limits.max_passes,
+                centre_zones: limits.centre_zones,
+                retry_zones: limits.retry_zones,
+                retry_first: limits.retry_first,
+            },
+        );
+        // A failed save shows in the health report; the limits still hold until a restart.
+        if let Err(error) = stored.save().await {
+            warn!("Failed saving the Focus now limits: {error:?}");
+        }
+    }
+    Ok(status_of(camera_uuid, address, limits))
 }
 
 /// Starts a Focus now, or refuses it with what is missing (also kept as its result).
@@ -101,13 +159,14 @@ pub(crate) async fn start(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlEr
         run.phase = None;
     }
     let started = Instant::now();
+    let limits = limits(camera_uuid).await;
     match prepare(camera_uuid, address).await {
         Ok(env) => {
-            let task = tokio::spawn(focus(env, FocusNowLimits::default()));
+            let task = tokio::spawn(focus(env, limits));
             if let Some(run) = runs().get_mut(&camera_uuid) {
                 run.task = Some(task);
             }
-            Ok(status_of(camera_uuid, address))
+            Ok(status_of(camera_uuid, address, limits))
         }
         Err((outcome, message)) => {
             finish(camera_uuid, result(outcome, message.clone(), started, None));
@@ -134,7 +193,7 @@ pub(crate) async fn stop(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlErr
             result(FocusNowOutcome::Stopped, message, Instant::now(), None),
         );
     }
-    Ok(status_of(camera_uuid, address))
+    Ok(status_of(camera_uuid, address, limits(camera_uuid).await))
 }
 
 async fn address(camera_uuid: Uuid) -> Result<Ipv4Addr, ControlError> {
