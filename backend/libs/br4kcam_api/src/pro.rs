@@ -216,8 +216,11 @@ pub struct ProCapabilities {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowOutcome {
-    /// Landed on the sharpest focus the camera's statistics saw.
+    /// Landed on the sharpest focus the camera's statistics saw, as sharp as the limits ask.
     Focused,
+    /// Landed on the best estimate when a limit (time, passes) came first, or where the sharpness the
+    /// limits ask could not be certified: `sharpness` says what could.
+    Approximate,
     /// Landed, but the sharpness there is well under the peak the search saw: the scene
     /// changed, or the landing missed.
     SceneChanged,
@@ -265,6 +268,31 @@ pub struct FocusNowResult {
     pub ratio: Option<f32>,
     /// Where it left the focus, in %, or null when it did not move it there.
     pub focus: Option<f32>,
+    /// The sharpness at the landing it certifies, as a fraction of the best (90 % confidence),
+    /// or null when it did not land.
+    pub sharpness: Option<f32>,
+}
+
+/// What a Focus now stops at: the first of the sharpness it certifies, its time, or its passes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, TS)]
+pub struct FocusNowLimits {
+    /// Sharpness to reach, as a fraction of the best, 0.3 to 0.95: 0.5 fast, 0.7 balanced
+    /// (the default), 0.9 precise.
+    pub sharpness: f32,
+    /// Longest run, in seconds, 4 to 30.
+    pub max_seconds: f32,
+    /// Most passes (the coarse pass, each ramp, each reading at rest), 3 to 20.
+    pub max_passes: u8,
+}
+
+impl Default for FocusNowLimits {
+    fn default() -> Self {
+        Self {
+            sharpness: 0.7,
+            max_seconds: 9.0,
+            max_passes: 12,
+        }
+    }
 }
 
 /// Focus now of one camera: a search for the sharpest focus at the centre of the picture,
@@ -278,4 +306,6 @@ pub struct FocusNowStatus {
     /// Its step while it runs.
     pub phase: Option<FocusNowPhase>,
     pub last: Option<FocusNowResult>,
+    /// The camera's limits, which the next run stops at.
+    pub limits: FocusNowLimits,
 }
