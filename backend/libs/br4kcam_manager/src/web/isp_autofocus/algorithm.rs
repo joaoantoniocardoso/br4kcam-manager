@@ -2449,4 +2449,29 @@ mod tests {
             sim.notes
         );
     }
+
+    #[tokio::test]
+    async fn tries_again_on_the_wider_window_when_the_centre_is_flat() {
+        // A dark centre (`reports/isp-af-r5.md`, round 9): no peak on it, a hump on the whole
+        // picture. With a retry window the run lands on that hump; without one it finds none.
+        for (retry_zones, retry_first) in [(0, false), (17, false), (17, true)] {
+            let mut sim = Sim::new(80, 1100.0, 1250.0);
+            sim.height = 0.0;
+            sim.floor = (21.0, 7.0);
+            sim.wide_height = 120.0;
+            sim.wait(0.5).await.unwrap();
+            let limits = FocusNowLimits {
+                retry_zones,
+                retry_first,
+                ..FocusNowLimits::default()
+            };
+            let landed = run(&mut sim, &MODEL, &limits).await;
+            if retry_zones == 0 {
+                assert_eq!(landed.err(), Some(FocusNowOutcome::LowTexture));
+            } else {
+                assert!(landed.is_ok() && sim.wide, "{landed:?}");
+                assert!(sim.error().abs() < 5.0, "{}", sim.error());
+            }
+        }
+    }
 }
