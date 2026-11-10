@@ -2597,4 +2597,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn places_the_peak_between_readings() {
+        // The vertex of the readings at rest 2 µs apart around the peak: within 1 µs of it on a
+        // symmetric hump, 1.5 µs on a skewed one; none from fewer than three positions.
+        assert_eq!(vertex(&[(1100.0, 90.0), (1102.0, 80.0)], 4.0), None);
+        for shape in [1.5, 2.0, 3.0, 4.0] {
+            for skew in [0.0, 0.2] {
+                for seed in 0..10 {
+                    let mut rng = Rng(seed);
+                    let offset = 2.0 * rng.uniform();
+                    let mut read = readings(&mut rng, shape, skew);
+                    let seen: Vec<(f64, f64)> = (-2..=2)
+                        .map(|n| 1100.0 + offset + 2.0 * f64::from(n))
+                        .map(|x| (x, read(x)))
+                        .collect();
+                    let x = vertex(&seen, 4.0).unwrap();
+                    let within = if skew == 0.0 { 1.0 } else { 1.5 };
+                    assert!(
+                        (x - 1100.0).abs() < within,
+                        "p {shape} skew {skew}: {x} from {seen:?}"
+                    );
+                }
+            }
+        }
+    }
 }
