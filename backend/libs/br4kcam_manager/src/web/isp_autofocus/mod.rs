@@ -26,14 +26,18 @@ use autopilot::{
     api::{Action as AutopilotAction, ActuatorsConfig, ActuatorsControl, FocusZoomPoints},
 };
 use br4kcam_api::pro::{
-    FocusNowLimits, FocusNowOutcome, FocusNowPhase, FocusNowResult, FocusNowStatus,
+    FocusNowContinuous, FocusNowLimits, FocusNowOutcome, FocusNowPhase, FocusNowResult,
+    FocusNowStatus,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::*;
 use uuid::Uuid;
 
 use crate::web::control_bridge::{ControlError, UNKNOWN_CAMERA};
-use algorithm::{CONSTANTS, Constants, Env, Frame, LANDED_RATIO, Landing, READER_TIMEOUT};
+use algorithm::{
+    CONSTANTS, Constants, Env, Floor, Frame, LANDED_RATIO, Landing, READER_TIMEOUT, STILL_OVER_V2,
+    Seed,
+};
 
 /// How long the first reported outputs may take, at the stream's 10 Hz.
 const FIRST_OUTPUTS: Duration = Duration::from_secs(2);
@@ -44,6 +48,29 @@ const WANTED: Duration = Duration::from_secs(3);
 /// How often a run renews its focus lease: a third of it, so one lost renewal does not end it.
 const LEASE_RENEWAL: Duration = Duration::from_millis(500);
 
+/// Continuous mode's watch after a landing (`reports/isp-af-r5.md` §4): it never refocuses within
+/// `HOLD_OFF` of a landing, and takes its baseline of v2 above the floor, the centre's sharpness,
+/// from the frames over the last `BASELINE` of it.
+const HOLD_OFF: Duration = Duration::from_secs(2);
+const BASELINE: f64 = 0.5;
+/// The watch refocuses once v2 has stayed under its baseline by more than the drop of the limit's
+/// sharpness less 0.1 (the design's hysteresis), summed over frames to `ALARM` (a CUSUM); and
+/// never on a drop under 4 times its frame noise at the baseline.
+const ALARM: f64 = 0.15;
+const NOISE_LEVELS: f64 = 4.0;
+/// After a zoom move, the watch refocuses once the zoom has been still this long; and never
+/// while the focus or the zoom moved more recently than that: a refocus started while the
+/// script still moves the lens to the user's command stops at once (`reports/isp-af-r5.md`).
+const ZOOM_STILL: f64 = 1.0;
+/// How far the focus can be off after a zoom move, µs: the spread of the coarse pass between
+/// units, which also covers the zoom correlation's curve.
+const ZOOM_SD: f64 = 14.0;
+/// After a refocus that did not land, the watch waits this long before it can refocus again.
+const BACKOFF: Duration = Duration::from_secs(10);
+/// A centre whose v2 at rest stands under this many times its frame sd has too little detail to
+/// watch, as a spike over its floor (`algorithm::SIGNIFICANT`).
+const TEXTURE: f64 = 6.0;
+
 /// One camera's Focus now.
 #[derive(Default)]
 struct Run {
@@ -52,6 +79,11 @@ struct Run {
     phase: Option<FocusNowPhase>,
     task: Option<JoinHandle<()>>,
     last: Option<FocusNowResult>,
+    /// Continuous mode's watch, after a landing, and the v2 it took at that landing.
+    watch: Option<JoinHandle<()>>,
+    base: Option<f64>,
+    /// What the last landing measured, which a watch turned on later starts from.
+    scene: Option<Seed>,
 }
 
 static RUNS: LazyLock<Mutex<HashMap<Uuid, Run>>> = LazyLock::new(Default::default);
@@ -189,10 +221,20 @@ pub(crate) fn start_listening() {
 pub(crate) async fn status(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlError> {
     let address = address(camera_uuid).await?;
     reader_answers(address).await;
-    Ok(status_of(camera_uuid, address, limits(camera_uuid).await))
+    Ok(status_of(
+        camera_uuid,
+        address,
+        limits(camera_uuid).await,
+        continuous(camera_uuid).await,
+    ))
 }
 
-fn status_of(camera_uuid: Uuid, address: Ipv4Addr, limits: FocusNowLimits) -> FocusNowStatus {
+fn status_of(
+    camera_uuid: Uuid,
+    address: Ipv4Addr,
+    limits: FocusNowLimits,
+    continuous: bool,
+) -> FocusNowStatus {
     let runs = runs();
     let run = runs.get(&camera_uuid);
     FocusNowStatus {
@@ -201,8 +243,9 @@ fn status_of(camera_uuid: Uuid, address: Ipv4Addr, limits: FocusNowLimits) -> Fo
         phase: run.and_then(|run| run.phase),
         last: run.and_then(|run| run.last.clone()),
         limits,
-        continuous: false,
-        watching: false,
+        continuous,
+        watching: run
+            .is_some_and(|run| run.watch.as_ref().is_some_and(|watch| !watch.is_finished())),
     }
 }
 
@@ -261,11 +304,97 @@ pub(crate) async fn set_limits(
             warn!("Failed saving the Focus now limits: {error:?}");
         }
     }
-    Ok(status_of(camera_uuid, address, limits))
+    Ok(status_of(
+        camera_uuid,
+        address,
+        limits,
+        continuous(camera_uuid).await,
+    ))
+}
+
+/// Whether the camera keeps its focus after a run.
+async fn continuous(camera_uuid: Uuid) -> bool {
+    let Some(manager) = settings::MANAGER.get() else {
+        return false;
+    };
+    let mut manager = manager.write().await;
+    manager
+        .settings
+        .get_focus_now_continuous_mut()
+        .get(&camera_uuid)
+        .is_some_and(|&continuous| continuous)
+}
+
+/// Saves whether the camera keeps its focus after its runs; off stops its watch.
+pub(crate) async fn set_continuous(
+    camera_uuid: Uuid,
+    continuous: FocusNowContinuous,
+) -> Result<FocusNowStatus, ControlError> {
+    let address = address(camera_uuid).await?;
+    if let Some(manager) = settings::MANAGER.get() {
+        let stored = &mut manager.write().await.settings;
+        if continuous.enabled {
+            stored
+                .get_focus_now_continuous_mut()
+                .insert(camera_uuid, true);
+        } else {
+            stored
+                .get_focus_now_continuous_mut()
+                .shift_remove(&camera_uuid);
+        }
+        // A failed save shows in the health report; the mode still holds until a restart.
+        if let Err(error) = stored.save().await {
+            warn!("Failed saving the Focus now mode: {error:?}");
+        }
+    }
+    if !continuous.enabled {
+        stop_watching(camera_uuid);
+    } else if let Some(scene) = {
+        // Turned on between runs: it watches now, from the last landing if there is one.
+        let mut runs = runs();
+        let run = runs.entry(camera_uuid).or_default();
+        (!run.running && run.watch.as_ref().is_none_or(|watch| watch.is_finished()))
+            .then(|| run.scene.unwrap_or_else(unanchored))
+    } {
+        let limits = limits(camera_uuid).await;
+        let watch = tokio::spawn(watch(
+            camera_uuid,
+            address,
+            scene,
+            limits,
+            Duration::ZERO,
+            true,
+            true,
+        ));
+        if let Some(run) = runs().get_mut(&camera_uuid) {
+            run.watch = Some(watch);
+        }
+    }
+    Ok(status_of(
+        camera_uuid,
+        address,
+        limits(camera_uuid).await,
+        continuous.enabled,
+    ))
+}
+
+/// Ends the camera's watch, if any.
+fn stop_watching(camera_uuid: Uuid) {
+    if let Some(watch) = runs()
+        .get_mut(&camera_uuid)
+        .and_then(|run| run.watch.take())
+    {
+        watch.abort();
+    }
 }
 
 /// Starts a Focus now, or refuses it with what is missing (also kept as its result).
 pub(crate) async fn start(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlError> {
+    start_from(camera_uuid, None).await
+}
+
+/// [`start`], or with `seed` a refocus around where the lens is (continuous mode).
+async fn start_from(camera_uuid: Uuid, seed: Option<Seed>) -> Result<FocusNowStatus, ControlError> {
     let address = address(camera_uuid).await?;
     {
         let mut runs = runs();
@@ -278,16 +407,24 @@ pub(crate) async fn start(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlEr
         }
         run.running = true;
         run.phase = None;
+        if let Some(watch) = run.watch.take() {
+            watch.abort();
+        }
     }
     let started = Instant::now();
     let limits = limits(camera_uuid).await;
     match prepare(camera_uuid, address).await {
         Ok(env) => {
-            let task = tokio::spawn(focus(env, limits));
+            let task = tokio::spawn(focus(env, limits, seed));
             if let Some(run) = runs().get_mut(&camera_uuid) {
                 run.task = Some(task);
             }
-            Ok(status_of(camera_uuid, address, limits))
+            Ok(status_of(
+                camera_uuid,
+                address,
+                limits,
+                continuous(camera_uuid).await,
+            ))
         }
         Err((outcome, message)) => {
             finish(camera_uuid, result(outcome, message.clone(), started, None));
@@ -302,6 +439,7 @@ pub(crate) async fn start(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlEr
 /// Stops a running Focus now where the focus is.
 pub(crate) async fn stop(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlError> {
     let address = address(camera_uuid).await?;
+    stop_watching(camera_uuid);
     let task = runs()
         .get_mut(&camera_uuid)
         .filter(|run| run.running)
@@ -314,7 +452,12 @@ pub(crate) async fn stop(camera_uuid: Uuid) -> Result<FocusNowStatus, ControlErr
             result(FocusNowOutcome::Stopped, message, Instant::now(), None),
         );
     }
-    Ok(status_of(camera_uuid, address, limits(camera_uuid).await))
+    Ok(status_of(
+        camera_uuid,
+        address,
+        limits(camera_uuid).await,
+        continuous(camera_uuid).await,
+    ))
 }
 
 async fn address(camera_uuid: Uuid) -> Result<Ipv4Addr, ControlError> {
@@ -428,7 +571,7 @@ fn command_sender(camera_uuid: Uuid) -> (mpsc::UnboundedSender<u16>, Arc<AtomicB
     (commands, failed)
 }
 
-async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
+async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
     let started = Instant::now();
     let camera_uuid = env.camera_uuid;
     load_learned(camera_uuid).await;
@@ -439,7 +582,34 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
     );
     // The camera on every line of the run: two cameras can focus at once.
     let span = info_span!("focus_now", camera = %camera_uuid);
-    let result = match algorithm::run(&mut env, &k, &limits).instrument(span).await {
+    let landed = match seed {
+        // Around where the lens rests now.
+        Some(seed) => {
+            let seed = Seed {
+                mu: env.last_sent,
+                ..seed
+            };
+            info!(
+                "Focus now of {camera_uuid}: again around {:.0} ± {:.1}",
+                seed.mu,
+                seed.var.sqrt()
+            );
+            match algorithm::refocus(&mut env, &k, &limits, seed)
+                .instrument(span.clone())
+                .await
+            {
+                // No hump around it: the whole search.
+                Err(FocusNowOutcome::NoPeak) => {
+                    algorithm::run(&mut env, &k, &limits).instrument(span).await
+                }
+                landed => landed,
+            }
+        }
+        None => algorithm::run(&mut env, &k, &limits).instrument(span).await,
+    };
+    let again = if seed.is_some() { "again " } else { "" };
+    let mut watch_from = None;
+    let result = match landed {
         Ok(landing) => {
             let focus = env.window.percent(env.window.input_for(landing.u));
             let ratio = Some(landing.ratio as f32);
@@ -473,20 +643,21 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
                 }
                 let (outcome, message) = if focused {
                     let message = format!(
-                        "Focused in {:.1} s: at least {:.0} % as sharp as the best",
+                        "Focused {again}in {:.1} s: at least {:.0} % as sharp as the best",
                         landing.seconds,
                         100.0 * landing.sharpness
                     );
                     (FocusNowOutcome::Focused, message)
                 } else {
                     let message = format!(
-                        "Approximate in {:.1} s: at least {:.0} % as sharp as the best ({:.0} % asked)",
+                        "Approximate {again}in {:.1} s: at least {:.0} % as sharp as the best ({:.0} % asked)",
                         landing.seconds,
                         100.0 * landing.sharpness,
                         100.0 * limits.sharpness
                     );
                     (FocusNowOutcome::Approximate, message)
                 };
+                watch_from = Some(landing);
                 FocusNowResult {
                     ratio,
                     focus: Some(focus),
@@ -510,7 +681,244 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits) {
         }
     };
     info!("Focus now of {camera_uuid}: {}", result.message);
+    let address = env.address;
+    let failed_refocus = seed.filter(|_| watch_from.is_none());
+    // The user moved the focus during the refocus: their choice, watched from there.
+    let by_hand = result.outcome == FocusNowOutcome::FocusMoved;
     finish(camera_uuid, result);
+    let scene = watch_from.map(|landing: Landing| Seed {
+        mu: landing.u,
+        var: 0.0,
+        w: landing.w,
+        height: landing.height,
+        floor: landing.floor,
+        half_width: landing.half_width,
+        step: landing.step,
+    });
+    if let Some(run) = runs().get_mut(&camera_uuid) {
+        run.scene = scene.or(run.scene);
+    }
+    // Continuous mode watches from a landing, and after a refocus that did not land it watches
+    // on against the last landing, later.
+    if continuous(camera_uuid).await
+        && let Some((scene, wait, fresh)) =
+            scene
+                .map(|scene| (scene, HOLD_OFF, true))
+                .or(failed_refocus.map(|seed| {
+                    if by_hand {
+                        (seed, HOLD_OFF, true)
+                    } else {
+                        (seed, BACKOFF, false)
+                    }
+                }))
+    {
+        let watch = tokio::spawn(watch(
+            camera_uuid,
+            address,
+            scene,
+            limits,
+            wait,
+            fresh,
+            false,
+        ));
+        if let Some(run) = runs().get_mut(&camera_uuid) {
+            run.watch = Some(watch);
+        }
+    }
+}
+
+/// Continuous mode: watches v2 at the centre after a landing (`scene`), and focuses again
+/// around where the lens is once it drops under the limit's sharpness less 0.1, or once a zoom
+/// move has ended. It watches v2 above the floor, its drop relative to the landing's, with no
+/// shape. A focus move of the user's own is their choice: it watches from where that settles
+/// instead. `fresh`: its baseline from now, else the last landing's. `settle` (turned on by
+/// hand): it first waits for the lens to be still as after a focus move, and focuses now when
+/// the centre has too little detail to watch. Without a landing to focus again around
+/// ([`unanchored`]), it focuses again with a whole Focus now.
+fn watch(
+    camera_uuid: Uuid,
+    address: Ipv4Addr,
+    scene: Seed,
+    limits: FocusNowLimits,
+    wait: Duration,
+    fresh: bool,
+    mut settle: bool,
+) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+    // Boxed with its type spelled out: its refocus's run ends by starting a watch.
+    Box::pin(async move {
+        let now = || afstat::seconds(Instant::now());
+        let watched = |frame: &Frame| frame.v2 - scene.floor.level();
+        // Its drop from `base`, and where it focuses again for a drop past `level`.
+        let fall = |base: f64, now: f64| 1.0 - now / base;
+        let under = |base: f64, level: f64| base * (1.0 - level);
+        tokio::time::sleep(wait).await;
+        afstat::want(address, WANTED);
+        tokio::time::sleep(Duration::from_secs_f64(BASELINE)).await;
+        let mut t = now();
+        let Some((mean, noise)) = ratio_now(address, watched) else {
+            warn!("Focus now watch of {camera_uuid}: no AF statistics, not watching");
+            return;
+        };
+        let mut base = {
+            let mut runs = runs();
+            let run = runs.entry(camera_uuid).or_default();
+            if fresh || run.base.is_none() {
+                run.base = Some(mean);
+            }
+            run.base.unwrap_or(mean)
+        };
+        // v2's relative drop is the sharpness lost, as the measured certificate takes it.
+        let level_of = |noise: f64, base: f64| {
+            (1.1 - f64::from(limits.sharpness)).max(NOISE_LEVELS * noise / base)
+        };
+        let mut level = level_of(noise, base);
+        info!(
+            "Focus now watch of {camera_uuid}: v2 {base:.3} (now {mean:.3} ± {noise:.3}), focuses again under {:.3}",
+            under(base, level)
+        );
+        // The lens from the reported outputs; without them, no refocus on a zoom move.
+        let mut outputs = autopilot::watch_lens_outputs(camera_uuid).await.ok();
+        let (mut lens, mut zoom_moved, mut moved, mut by_hand) = (
+            None,
+            None,
+            if settle { now() } else { f64::NEG_INFINITY },
+            settle,
+        );
+        let (mut cusum, mut down) = (0.0, 0.0);
+        let seed = loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            afstat::want(address, WANTED);
+            for frame in afstat::frames(address, t, f64::INFINITY) {
+                t = frame.t + 1e-6;
+                let y = fall(base, watched(&frame));
+                if y.is_finite() {
+                    cusum = (cusum + y - level).max(0.0);
+                    down = y;
+                }
+            }
+            if let Some(receiver) = outputs.as_mut() {
+                while let Ok((_, now_lens)) = receiver.try_recv() {
+                    if lens.is_some_and(|lens: LensOutputs| lens.zoom != now_lens.zoom) {
+                        zoom_moved = Some(now());
+                    } else if lens.is_some_and(|lens| lens.focus != now_lens.focus) {
+                        by_hand = true;
+                    }
+                    if lens.is_some_and(|lens| lens != now_lens) {
+                        moved = now();
+                    }
+                    lens = Some(now_lens);
+                }
+            }
+            if zoom_moved.is_some_and(|at| now() - at > ZOOM_STILL) {
+                info!("Focus now watch of {camera_uuid}: the zoom moved, focusing again");
+                break Seed {
+                    var: ZOOM_SD * ZOOM_SD,
+                    ..scene
+                };
+            }
+            // The user's own focus: once it has been still a while, the new base.
+            if by_hand {
+                if now() - moved > ZOOM_STILL + BASELINE {
+                    by_hand = false;
+                    if std::mem::take(&mut settle)
+                        && !textured(&afstat::frames(address, now() - BASELINE, f64::INFINITY))
+                    {
+                        warn!(
+                            "Keep in focus of {camera_uuid}: too little detail at the centre to watch, focusing now"
+                        );
+                        break Seed {
+                            height: 0.0,
+                            ..scene
+                        };
+                    }
+                    if let Some((mean, noise)) = ratio_now(address, watched) {
+                        (base, level, cusum) = (mean, level_of(noise, mean), 0.0);
+                        if let Some(run) = runs().get_mut(&camera_uuid) {
+                            run.base = Some(base);
+                        }
+                        info!(
+                            "Focus now watch of {camera_uuid}: focus moved by hand, watching from v2 {base:.3} ± {noise:.3}, focuses again under {:.3}",
+                            under(base, level)
+                        );
+                    }
+                }
+                continue;
+            }
+            if cusum > ALARM && now() - moved > ZOOM_STILL {
+                // How far off, from the drop, its sign unknown: along the chord from the still's
+                // top to half its height (as the ramp plans), up to that half width, and the
+                // landing's last step for what it left.
+                let (off, margin) = (
+                    2.0 * STILL_OVER_V2 * scene.half_width * down.clamp(0.0, 0.5),
+                    scene.step,
+                );
+                info!(
+                    "Focus now watch of {camera_uuid}: v2 down {down:.2}, about {off:.1} µs off, focusing again"
+                );
+                break Seed {
+                    var: (off + margin).powi(2),
+                    ..scene
+                };
+            }
+        };
+        drop(outputs);
+        // The refocus starts the next watch; this one ends.
+        if let Some(run) = runs().get_mut(&camera_uuid) {
+            run.watch = None;
+        }
+        if let Err(error) = start_from(camera_uuid, (seed.height > 0.0).then_some(seed)).await {
+            info!(
+                "Focus now watch of {camera_uuid}: not focusing again: {}",
+                error.message
+            );
+        }
+    })
+}
+
+/// What a watch turned on with no landing yet starts from: no height, so it focuses again with a
+/// whole Focus now.
+fn unanchored() -> Seed {
+    Seed {
+        mu: 0.0,
+        var: 0.0,
+        w: CONSTANTS.w,
+        height: 0.0,
+        floor: Floor::default(),
+        half_width: algorithm::HALF_WIDTH,
+        step: 2.0,
+    }
+}
+
+/// Whether the centre's v2 in `frames` at rest stands out of its frame noise enough to watch.
+fn textured(frames: &[Frame]) -> bool {
+    let n = frames.len() as f64;
+    let mean = frames.iter().map(|frame| frame.v2).sum::<f64>() / n;
+    let var = frames
+        .iter()
+        .map(|frame| (frame.v2 - mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+    frames.len() >= 5 && mean >= TEXTURE * var.sqrt()
+}
+
+/// What the watch watches (`watched`, v2) at the camera's centre over the last [`BASELINE`]:
+/// its mean and frame sd.
+fn ratio_now(address: Ipv4Addr, watched: impl Fn(&Frame) -> f64) -> Option<(f64, f64)> {
+    let now = afstat::seconds(Instant::now());
+    let ratios: Vec<f64> = afstat::frames(address, now - BASELINE, f64::INFINITY)
+        .iter()
+        .map(watched)
+        .filter(|ratio| ratio.is_finite())
+        .collect();
+    let n = ratios.len() as f64;
+    let mean = ratios.iter().sum::<f64>() / n;
+    let noise = (ratios
+        .iter()
+        .map(|ratio| (ratio - mean).powi(2))
+        .sum::<f64>()
+        / n)
+        .sqrt();
+    (ratios.len() >= 5).then_some((mean, noise))
 }
 
 fn result(
@@ -536,6 +944,8 @@ fn finish(camera_uuid: Uuid, result: FocusNowResult) {
     let run = runs.entry(camera_uuid).or_default();
     *run = Run {
         last: Some(result),
+        watch: run.watch.take(),
+        base: run.base,
         ..Default::default()
     };
 }
@@ -882,5 +1292,25 @@ mod tests {
         for u in [981.0, 1100.4, 1296.0] {
             assert!((window.output(window.input_for(u)) as f64 - u).abs() <= 0.5);
         }
+    }
+
+    #[test]
+    fn watches_only_a_centre_with_detail() {
+        // Keep in focus turned on by hand watches the centre from its v2 at rest: on camera .10's
+        // floor (13 ± 4, `reports/isp-af-r2.md`) there is nothing to watch, and it focuses now;
+        // on a hump's top it watches. Without frames, nothing to watch either.
+        let frames = |mean: f64, sd: f64| -> Vec<Frame> {
+            (0..15)
+                .map(|n| Frame {
+                    t: f64::from(n) / 30.0,
+                    v2: mean + if n % 2 == 0 { sd } else { -sd },
+                    v1: 0.0,
+                })
+                .collect()
+        };
+        assert!(!textured(&frames(13.0, 4.0)));
+        assert!(textured(&frames(110.0, 4.0)));
+        assert!(!textured(&frames(110.0, 4.0)[..3]));
+        assert!(!textured(&[]));
     }
 }
