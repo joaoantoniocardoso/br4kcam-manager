@@ -271,6 +271,7 @@ async fn limits(camera_uuid: Uuid) -> FocusNowLimits {
             estimator: match limits.estimator {
                 settings::FocusNowEstimator::Quadratic => FocusNowEstimator::Quadratic,
                 settings::FocusNowEstimator::Parabola => FocusNowEstimator::Parabola,
+                settings::FocusNowEstimator::Centroid => FocusNowEstimator::Centroid,
                 settings::FocusNowEstimator::Midpoint => FocusNowEstimator::Midpoint,
             },
             close: match limits.close {
@@ -320,6 +321,7 @@ pub(crate) async fn set_limits(
                 estimator: match limits.estimator {
                     FocusNowEstimator::Quadratic => settings::FocusNowEstimator::Quadratic,
                     FocusNowEstimator::Parabola => settings::FocusNowEstimator::Parabola,
+                    FocusNowEstimator::Centroid => settings::FocusNowEstimator::Centroid,
                     FocusNowEstimator::Midpoint => settings::FocusNowEstimator::Midpoint,
                 },
                 close: match limits.close {

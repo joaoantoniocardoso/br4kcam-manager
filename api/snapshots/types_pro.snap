@@ -16,7 +16,7 @@ export type FocusNowContinuous = {
     enabled: boolean,
 };
 
-export type FocusNowEstimator = "quadratic" | "parabola" | "midpoint";
+export type FocusNowEstimator = "quadratic" | "parabola" | "centroid" | "midpoint";
 
 export type FocusNowFallback = "kept_best" | "restored_start";
 

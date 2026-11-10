@@ -332,6 +332,8 @@ pub enum FocusNowEstimator {
     /// The parabola through the maximum and its two neighbours, on the statistic itself.
     #[default]
     Parabola,
+    /// The mean time of the frames above half the maximum, weighted by their height squared.
+    Centroid,
     /// Midway between where the hump crosses half its height on either side.
     Midpoint,
 }

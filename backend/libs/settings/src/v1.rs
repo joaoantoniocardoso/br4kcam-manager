@@ -57,6 +57,7 @@ fn centre_zones() -> u8 {
 #[serde(rename_all = "snake_case")]
 pub enum FocusNowEstimator {
     Quadratic,
+    Centroid,
     Midpoint,
     #[default]
     #[serde(other)]

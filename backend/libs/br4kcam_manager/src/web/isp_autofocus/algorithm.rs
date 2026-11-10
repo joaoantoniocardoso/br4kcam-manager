@@ -1118,6 +1118,7 @@ async fn ramp<E: Env>(
         FocusNowEstimator::Midpoint => midpoint(&frames, i, floor.level),
         FocusNowEstimator::Parabola => parabola(&frames, i, floor.level),
         FocusNowEstimator::Quadratic => quadratic(&frames, i, floor.level),
+        FocusNowEstimator::Centroid => power_centroid(&frames, i, floor.level),
     };
     let reported = env.outputs(tr0 - 1.0, env.now());
     // A ramp step came late, stalling the ramp, when an output is reported still on a command
@@ -1489,6 +1490,25 @@ fn quadratic(frames: &[Frame], i: usize, level: f64) -> (f64, f64) {
         }
     }
     parabola(frames, i, level)
+}
+
+/// The peak of the hump at frame `i` above `level`: the mean time of its frames over half its top
+/// within 0.4 s, weighted by their height above `level` squared, as (time, the top frame's height).
+/// A first moment, the centre of gravity of a sampled peak (compared with the others in Fisher &
+/// Naidu 1996, *Image Technology*, Springer, 385), sharpened by the power; the coarse pass's
+/// [`centroid`] is the same at the power 1. A moment of the frames themselves: no shape is fitted
+/// and no log taken.
+fn power_centroid(frames: &[Frame], i: usize, level: f64) -> (f64, f64) {
+    let top = frames[i];
+    let height = top.v2 - level;
+    let (weights, sum) = frames
+        .iter()
+        .filter(|frame| frame.v2 - level >= 0.5 * height && (frame.t - top.t).abs() < 0.4)
+        .fold((0.0, 0.0), |(weights, sum), frame| {
+            let weight = (frame.v2 - level).powi(2);
+            (weights + weight, sum + frame.t * weight)
+        });
+    (sum / weights, height)
 }
 
 /// When the hump at frame `i` crosses half its height above `level` before and after it, linear
