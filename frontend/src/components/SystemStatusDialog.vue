@@ -324,7 +324,7 @@
     @dismiss="closeReview"
   >
     <p class="text-sm text-white mb-3 opacity-90">
-      Choose an action for each parameter. IGNORE leaves the autopilot value in place, RESTORE writes the saved value back to the autopilot, and ADOPT saves the autopilot value into the setup. Restoring a mount type or channel function reboots the autopilot. Ignored values keep this warning until you re-apply the setup.
+      Choose an action for each parameter. IGNORE leaves the autopilot value in place, RESTORE writes the saved value back to the autopilot, and ADOPT saves the autopilot value into the setup. Restoring a camera or mount type reboots the autopilot. Ignored values keep this warning until you re-apply the setup.
     </p>
     <table class="w-full text-xs font-mono text-white">
       <thead>
@@ -757,6 +757,10 @@ const pendingAutopilotRestart = ref<(() => void) | null>(null)
 const reviewRestoresParameters = computed(() =>
   reviewDrifts.value.some((drift) => reviewActionOf(drift.name) === 'RESTORE'),
 )
+// Camera and mount types take effect after a reboot, channel functions at once.
+const reviewRestartsAutopilot = computed(() =>
+  reviewDrifts.value.some((drift) => reviewActionOf(drift.name) === 'RESTORE' && drift.name.endsWith('_TYPE')),
+)
 
 const setReviewAction = (name: string, action: ReviewAction): void => {
   reviewActions.value = { ...reviewActions.value, [name]: action }
@@ -812,7 +816,7 @@ const runApplyReview = async (): Promise<void> => {
 }
 
 const requestApplyReview = (): void => {
-  if (reviewRestoresParameters.value) {
+  if (reviewRestartsAutopilot.value) {
     pendingAutopilotRestart.value = runApplyReview
     return
   }
