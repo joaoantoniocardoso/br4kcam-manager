@@ -1215,6 +1215,35 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_says_whether_the_apply_reboots() {
+        // A channel function written back alone does not reboot, a mount type does, and the
+        // preview says what the apply's plan does.
+        let snapshot = set_up(empty(), CAMERA);
+        let saved = config_for(&snapshot.saved[&CAMERA].clone());
+        let drifted = holding(snapshot.clone(), "SERVO10_FUNCTION", ParamType::INT16(1));
+        let plan = plan_apply(&drifted, CAMERA, &saved, false).unwrap();
+        assert!(names(&plan.writes).contains(&"SERVO10_FUNCTION"));
+        assert!(!names(&plan.writes).into_iter().any(takes_reboot));
+        assert_eq!(
+            preview(&drifted, CAMERA, &saved, false).unwrap().1,
+            plan.reboot
+        );
+        assert!(!plan.reboot);
+
+        let config = parameters(api::ActuatorsParametersConfig {
+            tilt_mnt_type: Some(api::MountType::Servo),
+            ..Default::default()
+        });
+        let plan = plan_apply(&snapshot, CAMERA, &config, false).unwrap();
+        assert_eq!(names(&plan.writes), ["MNT1_TYPE"]);
+        assert_eq!(
+            preview(&snapshot, CAMERA, &config, false).unwrap().1,
+            plan.reboot
+        );
+        assert!(plan.reboot);
+    }
+
+    #[test]
     fn forgetting_a_camera_releases_only_what_it_still_holds() {
         let snapshot = holding(
             set_up(empty(), CAMERA),
