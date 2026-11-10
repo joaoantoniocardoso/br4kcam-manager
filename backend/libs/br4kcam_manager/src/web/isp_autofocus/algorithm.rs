@@ -2623,4 +2623,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn bounds_the_peak_from_the_readings_at_rest() {
+        // Readings 2 µs apart across the peak, at any phase: the highest plus the largest rise is
+        // never under the peak, on every shape.
+        for shape in [1.5, 2.0, 3.0, 4.0] {
+            for skew in [0.0, 0.2] {
+                for phase in 0..10 {
+                    let offset = 0.2 * f64::from(phase);
+                    let seen: Vec<(f64, f64)> = (-3..=3)
+                        .map(|n| 1100.0 + offset + 2.0 * f64::from(n))
+                        .map(|x| (x, 13.0 + 100.0 * generalized(x - 1100.0, 3.4, shape, skew)))
+                        .collect();
+                    let bound = monotone(&seen, 13.0);
+                    assert!(bound >= 100.0, "p {shape} skew {skew} at {offset}: {bound}");
+                }
+            }
+        }
+    }
 }
