@@ -2642,4 +2642,98 @@ mod tests {
             }
         }
     }
+
+    /// The peak estimators, closes and certificates as the desk shortlisted them
+    /// (`reports/af-estimators.md`): A, B and C.
+    const SHORTLISTED: [(FocusNowEstimator, FocusNowClose, FocusNowCertificate); 5] = [
+        (
+            FocusNowEstimator::Midpoint,
+            FocusNowClose::Hill,
+            FocusNowCertificate::Measured,
+        ),
+        (
+            FocusNowEstimator::Parabola,
+            FocusNowClose::Parabola,
+            FocusNowCertificate::Measured,
+        ),
+        (
+            FocusNowEstimator::Midpoint,
+            FocusNowClose::Hill,
+            FocusNowCertificate::Monotone,
+        ),
+        (
+            FocusNowEstimator::Quadratic,
+            FocusNowClose::Hill,
+            FocusNowCertificate::Measured,
+        ),
+        (
+            FocusNowEstimator::Centroid,
+            FocusNowClose::Hill,
+            FocusNowCertificate::Measured,
+        ),
+    ];
+
+    #[tokio::test]
+    async fn focuses_on_humps_of_other_shapes() {
+        // Exponential-power humps, pointier and flatter than at the exponent 2 (round 9's p 1.3 to
+        // 2.1, `reports/af-sensing-mechanics.md`'s up to 3.6), one side wider or not, on a strong
+        // hump and on camera .10's weak one over its floor, at each preset. It lands on the hump,
+        // never says "focused" short of the still's own sharpness asked, and what it reports holds
+        // on the still within 0.1 (on a pointy hump the ramp under-reads the top: 0.08 at p 1.5).
+        for (estimator, close, certificate) in SHORTLISTED {
+            let mut within = 0;
+            let mut cases = 0;
+            for (shape, skew) in [
+                (1.5, 0.0),
+                (2.0, 0.0),
+                (3.0, 0.0),
+                (4.0, 0.0),
+                (1.5, 0.2),
+                (3.0, 0.2),
+            ] {
+                for (seed, peak, start, weak) in [
+                    (90, 1020.0, 981.0, false),
+                    (91, 1180.0, 1296.0, false),
+                    (92, 1100.0, 981.0, true),
+                    (93, 1240.0, 1296.0, true),
+                ] {
+                    for sharpness in [0.5, 0.7, 0.9] {
+                        let limits = FocusNowLimits {
+                            sharpness,
+                            estimator,
+                            close,
+                            certificate,
+                            ..FocusNowLimits::default()
+                        };
+                        let mut sim = Sim::new(seed, peak, start);
+                        (sim.shape, sim.skew) = (shape, skew);
+                        if weak {
+                            sim.height = 100.0;
+                            sim.floor = (13.0, 4.0);
+                        }
+                        sim.wait(0.5).await.unwrap();
+                        let landing = run(&mut sim, &MODEL, &limits).await.unwrap();
+                        sim.wait(0.6).await.unwrap();
+                        let still = sim.still();
+                        let q = f64::from(sharpness);
+                        let case = format!(
+                            "{estimator:?} {close:?} {certificate:?} p {shape} skew {skew} {peak} from {start} weak {weak}: {landing:?} {} still {still:.3}",
+                            sim.error()
+                        );
+                        assert!(sim.error().abs() < 4.0, "{case}");
+                        assert!(landing.sharpness < q || still >= q, "{case}");
+                        assert!(!landing.certified || still >= q, "{case}");
+                        assert!(still >= landing.sharpness - 0.1, "{case}");
+                        within += usize::from(still >= q);
+                        cases += 1;
+                    }
+                }
+            }
+            // 70 to 72 of 72 here; the misses are Precise on a weak skewed hump, "approximate".
+            assert!(
+                within * 10 >= cases * 9,
+                "{estimator:?} {close:?} {certificate:?}: {within} of {cases} within"
+            );
+        }
+    }
 }
