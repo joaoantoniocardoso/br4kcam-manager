@@ -40,6 +40,7 @@ impl Settings {
                 program_max_exposure: IndexMap::default(),
                 focus_now_limits: IndexMap::default(),
                 focus_now_learned: IndexMap::default(),
+                focus_now_continuous: IndexMap::default(),
             }),
         };
 
@@ -179,6 +180,10 @@ impl Settings {
         self.inner.get_focus_now_learned_mut()
     }
 
+    pub fn get_focus_now_continuous_mut(&mut self) -> &mut IndexMap<Uuid, bool> {
+        self.inner.get_focus_now_continuous_mut()
+    }
+
     pub fn to_raw(&self) -> RawSettingsData {
         self.inner.to_raw()
     }
@@ -234,6 +239,7 @@ pub async fn clear() -> Result<()> {
     guard.settings.get_program_max_exposure_mut().clear();
     guard.settings.get_focus_now_limits_mut().clear();
     guard.settings.get_focus_now_learned_mut().clear();
+    guard.settings.get_focus_now_continuous_mut().clear();
     guard.settings.save().await
 }
 

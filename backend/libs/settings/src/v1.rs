@@ -17,6 +17,10 @@ pub struct SettingsDataV1 {
     /// What each camera's Focus now learned from its certified runs. Absent from older files.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub focus_now_learned: IndexMap<Uuid, FocusNowLearned>,
+    /// The cameras that keep their focus after a Focus now (true), the others absent. Absent from
+    /// older files.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub focus_now_continuous: IndexMap<Uuid, bool>,
     // todo: pub image: IndexMap<Uuid, CameraImageSettings>,
 }
 
@@ -218,6 +222,7 @@ impl From<SettingsDataV0> for SettingsDataV1 {
             program_max_exposure: IndexMap::default(),
             focus_now_limits: IndexMap::default(),
             focus_now_learned: IndexMap::default(),
+            focus_now_continuous: IndexMap::default(),
         }
     }
 }
@@ -241,6 +246,10 @@ impl SettingsDataImpl for SettingsDataV1 {
 
     fn get_focus_now_learned_mut(&mut self) -> &mut IndexMap<Uuid, FocusNowLearned> {
         &mut self.focus_now_learned
+    }
+
+    fn get_focus_now_continuous_mut(&mut self) -> &mut IndexMap<Uuid, bool> {
+        &mut self.focus_now_continuous
     }
 
     fn to_raw(&self) -> RawSettingsData {
