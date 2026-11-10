@@ -2357,4 +2357,35 @@ mod tests {
             assert!(landing.is_ok() && sim.error().abs() < 4.0, "{case}");
         }
     }
+
+    #[tokio::test]
+    async fn measures_again_when_the_hump_comes_in_the_run_in() {
+        // Camera .10 at zoom 2.0 (`reports/isp-af-r5.md`, round 7): the coarse pass reads the peak
+        // 40 to 70 µs low with a confident learned bias, so the ramp's slow part starts under the
+        // peak and its fast run-in crosses the hump. Taken for a slow measurement, the landing
+        // missed the hump and the close walked on its floor to "no peak". On a weak hump, with the
+        // midpoint and the hill-climbing close: the parabolas can end on a lower reading than one
+        // they had there.
+        for (seed, peak, bias) in [(70, 1100.0, -45.0), (72, 1200.0, -45.0)] {
+            let k = Constants {
+                coarse_bias_r: bias,
+                coarse_learned_r: 5,
+                ..MODEL
+            };
+            let mut sim = Sim::new(seed, peak, 981.0);
+            // Its height and floor as there: 60 over 21 ± 7.
+            sim.height = 60.0;
+            sim.floor = (21.0, 7.0);
+            sim.wait(0.5).await.unwrap();
+            let limits = FocusNowLimits {
+                estimator: FocusNowEstimator::Midpoint,
+                close: FocusNowClose::Hill,
+                ..FocusNowLimits::default()
+            };
+            let landing = run(&mut sim, &k, &limits).await;
+            sim.wait(0.6).await.unwrap();
+            let case = format!("{peak} {bias}: {landing:?} {}", sim.error());
+            assert!(landing.is_ok() && sim.error().abs() < 4.0, "{case}");
+        }
+    }
 }
