@@ -282,11 +282,15 @@ pub(crate) async fn set_limits(
         || !(3..=20).contains(&limits.max_passes)
         || !(1..=17).contains(&limits.centre_zones)
         || limits.centre_zones.is_multiple_of(2)
+        || limits.retry_zones != 0
+            && (limits.retry_zones > 17
+                || limits.retry_zones.is_multiple_of(2)
+                || limits.retry_zones <= limits.centre_zones)
     {
         return Err(ControlError {
             status: 400,
             message:
-                "Focus now limits: sharpness 0.3 to 0.95, max_seconds 4 to 30, max_passes 3 to 20, centre_zones odd, 1 to 17".into(),
+                "Focus now limits: sharpness 0.3 to 0.95, max_seconds 4 to 30, max_passes 3 to 20, centre_zones odd, 1 to 17, retry_zones 0 or odd, past centre_zones, up to 17".into(),
         });
     }
     if let Some(manager) = settings::MANAGER.get() {
@@ -536,11 +540,20 @@ async fn prepare(
         .ok_or_else(|| not_available("The camera's focus calibration is not set up".into()))?;
     // The start's sharpness at rest, before anything moves: what a failed run has to beat.
     let mut start_v2 = None;
+    let mut start_noise = 0.0;
     for _ in 0..10 {
         let now = afstat::seconds(Instant::now());
         let frames = afstat::frames(address, now - START_READ, f64::INFINITY);
         if frames.len() >= 5 {
-            start_v2 = Some(frames.iter().map(|frame| frame.v2).sum::<f64>() / frames.len() as f64);
+            let n = frames.len() as f64;
+            let mean = frames.iter().map(|frame| frame.v2).sum::<f64>() / n;
+            let var = frames
+                .iter()
+                .map(|frame| (frame.v2 - mean).powi(2))
+                .sum::<f64>()
+                / (n - 1.0);
+            start_v2 = Some(mean);
+            start_noise = (var / n).sqrt();
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -577,8 +590,10 @@ async fn prepare(
         failed,
         renewal,
         start_v2,
+        start_noise,
         best: None,
         estimate: None,
+        wide: false,
     })
 }
 
@@ -901,11 +916,14 @@ fn result(
 pub(crate) trait Ending: Env {
     /// The focus slider's percent that gives an output.
     fn percent(&self, u: f64) -> f32;
-    /// The output the run started from, and its v2 at rest, when read.
+    /// The output the run started from, and its v2 at rest with its noise, when read.
     fn start_output(&self) -> f64;
-    fn start_reading(&self) -> Option<f64>;
+    fn start_reading(&self) -> Option<(f64, f64)>;
     /// Where a failed run falls back on, from its notes.
     fn best_measured(&self) -> Option<f64>;
+    /// Whether the run reads the retry window, and back to the centre's.
+    fn wide(&self) -> bool;
+    fn narrow(&mut self);
     /// Shows a focus on the slider, the landing's or the fall-back's.
     async fn show(&mut self, percent: f32);
     /// Learns the biases of a certified landing.
@@ -924,6 +942,7 @@ async fn conclude<E: Ending>(
 ) -> (FocusNowResult, Option<Landing>) {
     let mut watch_from = None;
     let result = match landed {
+        Ok(landing) if env.wide() => widened(env, k, limits, &landing, started).await,
         Ok(landing) => {
             let focus = env.percent(landing.u);
             let ratio = Some(landing.ratio as f32);
@@ -986,6 +1005,8 @@ async fn conclude<E: Ending>(
             }
         }
         Err(outcome) => {
+            // The fall-back compares readings with the centre's start.
+            env.narrow();
             let restore = !matches!(
                 outcome,
                 FocusNowOutcome::FocusMoved | FocusNowOutcome::Stopped
@@ -1038,6 +1059,55 @@ async fn conclude<E: Ending>(
         }
     };
     (result, watch_from)
+}
+
+/// The end of a run that landed on its retry window: never "focused", as the centre is not what it
+/// measured; "approximate" when the centre at rest there is not less sharp than at the start,
+/// else back on the start (`reports/isp-af-r5.md`, round 9).
+async fn widened<E: Ending>(
+    env: &mut E,
+    k: &Constants,
+    limits: &FocusNowLimits,
+    landing: &Landing,
+    started: Instant,
+) -> FocusNowResult {
+    env.narrow();
+    let centre = algorithm::at_rest(env, algorithm::FALL_BACK_READ).await;
+    let start = env.start_output();
+    let worse = match (centre, env.start_reading()) {
+        (Ok((v2, noise)), Some((start_v2, start_noise))) => {
+            start_v2 - v2 > 4.0 * noise.hypot(start_noise)
+        }
+        _ => true,
+    };
+    if worse {
+        let until = env.now() + f64::from(limits.max_seconds) - started.elapsed().as_secs_f64();
+        let fell = algorithm::fall_back(env, k, limits, None, start, until).await;
+        if fell.is_err() {
+            env.send(start);
+        }
+        let focus = env.percent(env.last_sent());
+        let message = format!(
+            "{}: the whole picture's peak is less sharp at the centre than the start: restored the start",
+            message_of(FocusNowOutcome::LowTexture)
+        );
+        return FocusNowResult {
+            fallback: Some(FocusNowFallback::RestoredStart),
+            ..result(FocusNowOutcome::LowTexture, message, started, Some(focus))
+        };
+    }
+    let focus = env.percent(landing.u);
+    env.show(focus).await;
+    let message = format!(
+        "Approximate in {:.1} s: at least {:.0} % as sharp as the best on the wider window; too little detail at the centre to certify it",
+        landing.seconds,
+        100.0 * landing.sharpness
+    );
+    FocusNowResult {
+        ratio: Some(landing.ratio as f32),
+        focus: Some(focus),
+        ..result(FocusNowOutcome::Approximate, message, started, None)
+    }
 }
 
 /// Failures after which the run still measured something worth falling back on.
@@ -1204,8 +1274,12 @@ struct LiveEnv {
     /// The centre's v2 at rest before the first move, and the run's notes: its best reading at
     /// rest `(µs, v2)` and where its passes last placed the peak.
     start_v2: Option<f64>,
+    /// Its noise (the frames' sd over √n).
+    start_noise: f64,
     best: Option<(f64, f64)>,
     estimate: Option<f64>,
+    /// Whether the run reads the camera's retry window ([`Env::widen`]).
+    wide: bool,
 }
 
 impl LiveEnv {
@@ -1228,12 +1302,20 @@ impl Ending for LiveEnv {
         f64::from(self.start.focus)
     }
 
-    fn start_reading(&self) -> Option<f64> {
-        self.start_v2
+    fn start_reading(&self) -> Option<(f64, f64)> {
+        self.start_v2.map(|v2| (v2, self.start_noise))
     }
 
     fn best_measured(&self) -> Option<f64> {
         LiveEnv::best_measured(self)
+    }
+
+    fn wide(&self) -> bool {
+        self.wide
+    }
+
+    fn narrow(&mut self) {
+        self.wide = false;
     }
 
     async fn show(&mut self, percent: f32) {
@@ -1336,7 +1418,11 @@ impl Env for LiveEnv {
     }
 
     fn frames(&self, t0: f64, t1: f64) -> Vec<Frame> {
-        afstat::frames(self.address, t0, t1)
+        if self.wide {
+            afstat::frames_wide(self.address, t0, t1)
+        } else {
+            afstat::frames(self.address, t0, t1)
+        }
     }
 
     fn outputs(&self, t0: f64, t1: f64) -> Vec<(f64, f64)> {
@@ -1355,10 +1441,22 @@ impl Env for LiveEnv {
 
     fn note(&mut self, u: f64, v2: Option<f64>) {
         match v2 {
+            // A reading on the retry window does not compare with the centre's start.
+            Some(_) if self.wide => {}
             Some(v2) if self.best.is_none_or(|(_, best)| v2 > best) => self.best = Some((u, v2)),
             Some(_) => {}
             None => self.estimate = Some(u),
         }
+    }
+
+    fn widen(&mut self) -> bool {
+        let now = afstat::seconds(Instant::now());
+        self.wide =
+            !afstat::frames_wide(self.address, now - READER_TIMEOUT, f64::INFINITY).is_empty();
+        if self.wide {
+            info!("Focus now: too little detail at the centre, again on the retry window");
+        }
+        self.wide
     }
 }
 
