@@ -2344,4 +2344,17 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn focuses_from_between_the_peak_and_the_nearer_end() {
+        // A focus left a little above the peak, nearer the window's low end: the coarse pass
+        // rises, away from the peak (`reports/isp-af-r5.md`: low_texture live on camera .11).
+        for (seed, peak, above) in [(60, 1020.0, 10.0), (61, 1100.0, 8.0), (62, 1100.0, 30.0)] {
+            let mut sim = Sim::new(seed, peak, (peak + C_F + above).round());
+            let landing = focus(&mut sim).await;
+            sim.wait(0.6).await.unwrap();
+            let case = format!("{peak} +{above}: {landing:?} {}", sim.error());
+            assert!(landing.is_ok() && sim.error().abs() < 4.0, "{case}");
+        }
+    }
 }
