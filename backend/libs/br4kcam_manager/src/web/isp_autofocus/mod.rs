@@ -737,6 +737,17 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
     }
 }
 
+/// The drop of v2 above the floor, from its baseline, that the watch takes for a loss of focus;
+/// none for a baseline at or under the floor (a lens by hand out of focus), as a relative drop
+/// of it is no loss.
+fn watch_level(sharpness: f32, noise: f64, base: f64) -> f64 {
+    if base > 0.0 {
+        (1.1 - f64::from(sharpness)).max(NOISE_LEVELS * noise / base)
+    } else {
+        f64::INFINITY
+    }
+}
+
 enum LensMove {
     None,
     Zoom,
@@ -796,9 +807,7 @@ fn watch(
             run.base.unwrap_or(mean)
         };
         // v2's relative drop is the sharpness lost, as the measured certificate takes it.
-        let level_of = |noise: f64, base: f64| {
-            (1.1 - f64::from(limits.sharpness)).max(NOISE_LEVELS * noise / base)
-        };
+        let level_of = |noise: f64, base: f64| watch_level(limits.sharpness, noise, base);
         let mut level = level_of(noise, base);
         info!(
             "Focus now watch of {camera_uuid}: v2 {base:.3} (now {mean:.3} ± {noise:.3}), focuses again under {:.3}",
@@ -1751,6 +1760,17 @@ mod tests {
         assert!(textured(&frames(110.0, 4.0)));
         assert!(!textured(&frames(110.0, 4.0)[..3]));
         assert!(!textured(&[]));
+    }
+
+    #[test]
+    fn a_baseline_under_the_floor_has_no_drop_to_watch() {
+        // The user's focus at 51 left v2 at -24 ± 2.9 over the floor: a rise to -12 read as a
+        // drop of 0.49, and refocused.
+        assert!(watch_level(0.9, 2.9, -23.971).is_infinite());
+        assert!(watch_level(0.9, 2.9, 0.0).is_infinite());
+        // On a hump: the limit's sharpness less 0.1, or 4 noises.
+        assert!((watch_level(0.9, 0.5, 50.0) - 0.2).abs() < 1e-6);
+        assert!((watch_level(0.9, 5.0, 29.2) - 20.0 / 29.2).abs() < 1e-6);
     }
 
     #[test]
