@@ -63,7 +63,10 @@ pub(crate) struct Constants {
     pub t_cmd: f64,
     /// Output change to its report, s (§3.1).
     pub seen_lag: f64,
-    /// Least height of a spike over the floor of the centre v2 (af-isp-10 §4, coring 90).
+    /// Least height of a spike over the floor of the centre v2 (af-isp-10 §4, coring 90), for a
+    /// floor with no noise of its own to scale it by: at ISO 100 the coring leaves the floor at 0
+    /// ± 0.1 and the hump, at a frame's 8 µs of travel, 2 to 20 high (live, 2026-11-11). Where the
+    /// floor has noise, [`SIGNIFICANT`] sd of it is the least.
     pub min_spike: f64,
     /// Coarse error of a falling jump, µs, until a camera's own runs measure it: the mean of
     /// 10 runs of Focus now itself on both units, −26 to +2 (`reports/isp-af-r2.md`; jumps sent
@@ -100,7 +103,7 @@ pub(crate) const CONSTANTS: Constants = Constants {
     coarse_learned_r: 0,
     t_cmd: 0.02,
     seen_lag: 0.13,
-    min_spike: 12.0,
+    min_spike: 4.0,
     coarse_bias_f: -8.0,
     coarse_bias_r: 25.0,
     w: 3.4,
@@ -2268,7 +2271,7 @@ mod tests {
         assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::CommandLost));
 
         let mut sim = Sim::new(7, 1100.0, 981.0);
-        sim.height = 5.0;
+        sim.height = 2.0;
         assert_eq!(focus(&mut sim).await, Err(FocusNowOutcome::LowTexture));
 
         // The detail goes after the coarse pass.
@@ -2297,6 +2300,171 @@ mod tests {
                 sim.error()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn focuses_on_a_floor_without_noise() {
+        // Daylight, 1/30 s ISO 100 (live, 2026-11-11, camera .10): the coring leaves the floor at
+        // 0 ± 0.1 and the hump 23 high at zoom 1.4, 7 at zoom 2.0. Wholly under the least of 12 it
+        // was taken for no detail in 33 of 45 runs.
+        for height in [23.0, 7.0] {
+            let mut landed = 0;
+            for (seed, peak) in [(1, 1040.0), (2, 1100.0), (3, 1180.0), (4, 1260.0)] {
+                for start in [981.0, 1296.0, peak + 30.0, peak - 30.0] {
+                    let mut sim = Sim::new(seed, peak, start);
+                    sim.height = height;
+                    sim.floor = (0.0, 0.1);
+                    let landing = focus(&mut sim).await;
+                    sim.wait(0.6).await.unwrap();
+                    landed += (landing.is_ok() && sim.error().abs() < 4.0) as u32;
+                }
+            }
+            assert!(landed >= 12, "height {height}: {landed} of 16");
+        }
+    }
+
+    /// A recorded coarse leg's frames and reported outputs, replayed.
+    struct Recorded {
+        frames: Vec<Frame>,
+        outputs: Vec<(f64, f64)>,
+        now: f64,
+        last_sent: f64,
+    }
+
+    impl Env for Recorded {
+        fn window(&self) -> (f64, f64) {
+            (1380.0, 2130.0)
+        }
+        fn now(&self) -> f64 {
+            self.now
+        }
+        fn last_sent(&self) -> f64 {
+            self.last_sent
+        }
+        fn send(&mut self, u: f64) {
+            self.last_sent = u;
+        }
+        async fn wait(&mut self, seconds: f64) -> Result<(), FocusNowOutcome> {
+            self.now += seconds;
+            Ok(())
+        }
+        fn frames(&self, t0: f64, t1: f64) -> Vec<Frame> {
+            let now = self.now;
+            let frames = self.frames.iter();
+            frames
+                .filter(|f| t0 <= f.t && f.t < t1 && f.t <= now)
+                .copied()
+                .collect()
+        }
+        fn outputs(&self, t0: f64, t1: f64) -> Vec<(f64, f64)> {
+            let now = self.now;
+            let outputs = self.outputs.iter();
+            outputs
+                .filter(|&&(t, _)| t0 <= t && t < t1 && t <= now)
+                .copied()
+                .collect()
+        }
+        fn phase(&mut self, _phase: FocusNowPhase) {}
+    }
+
+    #[tokio::test]
+    async fn sees_the_hump_of_a_recorded_daylight_sweep() {
+        // Camera .10, zoom 2.0, 1/30 s ISO 100, 2026-11-11 11:49, run c10_114906: the first leg
+        // down from 2112 to 1380 at about 257 µs/s, frames (ms from the send, v2 of the centre
+        // 3 × 3 zones) from 1.2 s before it to 4.3 s after. The 4K stills peak at 1636. The frame at the top of the
+        // hump is 7.1 over a floor of 0.0 ± 0.1: under the least of 12 that the legs of the
+        // 15 runs at this zoom were all dismissed by.
+        #[rustfmt::skip]
+        const FRAMES: [(i32, f64); 165] = [
+            (-1176, 0.0), (-1143, 0.0), (-1110, 0.0), (-1076, 0.1), (-1043, 0.0), (-1010, 0.0),
+            (-976, 0.0), (-943, 0.0), (-910, 0.0), (-876, 0.0), (-843, 0.0), (-809, 0.0),
+            (-776, 0.6), (-743, 0.0), (-709, 0.0), (-676, 0.0), (-643, 0.1), (-609, 0.0),
+            (-576, 0.0), (-543, 0.0), (-509, 0.0), (-476, 0.0), (-442, 0.0), (-409, 0.0),
+            (-376, 0.0), (-342, 0.0), (-309, 0.3), (-276, 0.0), (-242, 0.4), (-209, 0.0),
+            (-181, 0.0), (-140, 0.0), (-104, 0.0), (-76, 0.3), (-39, 0.0), (-7, 0.0),
+            (19, 0.0), (59, 0.0), (92, 0.1), (122, 0.1), (159, 0.0), (191, 0.1),
+            (223, 0.0), (259, 0.0), (294, 0.0), (322, 0.0), (363, 0.0), (390, 0.0),
+            (419, 0.0), (464, 0.2), (489, 0.0), (522, 0.0), (560, 0.0), (594, 0.0),
+            (623, 0.0), (661, 0.0), (693, 0.0), (722, 0.0), (761, 0.0), (794, 0.0),
+            (819, 0.0), (866, 0.0), (896, 0.0), (924, 0.2), (961, 0.0), (994, 0.0),
+            (1020, 0.0), (1061, 0.0), (1094, 0.0), (1119, 0.0), (1160, 0.0), (1195, 0.0),
+            (1219, 0.1), (1261, 0.0), (1293, 0.0), (1320, 0.0), (1362, 0.0), (1395, 0.0),
+            (1419, 0.0), (1459, 0.0), (1495, 0.1), (1520, 0.0), (1569, 0.0), (1594, 0.0),
+            (1621, 0.0), (1659, 0.0), (1693, 0.0), (1720, 0.0), (1760, 0.0), (1790, 0.0),
+            (1824, 0.0), (1860, 0.0), (1889, 0.0), (1920, 0.0), (1961, 0.0), (1991, 0.0),
+            (2029, 0.0), (2065, 0.0), (2089, 0.9), (2120, 6.3), (2161, 7.1), (2190, 0.2),
+            (2221, 0.0), (2259, 0.0), (2293, 0.0), (2320, 0.4), (2359, 0.0), (2390, 0.0),
+            (2420, 0.0), (2461, 0.0), (2493, 0.0), (2520, 0.0), (2560, 0.0), (2590, 0.0),
+            (2620, 0.0), (2662, 0.0), (2693, 0.0), (2721, 0.0), (2761, 0.0), (2790, 0.0),
+            (2821, 0.0), (2865, 0.0), (2897, 0.0), (2921, 0.0), (2962, 0.0), (2994, 0.0),
+            (3021, 0.0), (3060, 0.3), (3097, 0.0), (3121, 0.0), (3166, 0.0), (3195, 0.0),
+            (3225, 0.0), (3263, 0.0), (3294, 0.0), (3321, 0.0), (3361, 0.0), (3394, 0.0),
+            (3421, 0.0), (3460, 0.0), (3493, 0.0), (3529, 0.0), (3560, 0.0), (3597, 0.0),
+            (3631, 0.0), (3661, 0.1), (3694, 0.0), (3729, 0.0), (3761, 0.0), (3795, 0.0),
+            (3831, 0.2), (3864, 0.0), (3892, 0.0), (3932, 0.0), (3960, 0.0), (3989, 0.0),
+            (4032, 0.0), (4064, 0.0), (4091, 0.0), (4130, 0.0), (4159, 0.0), (4193, 0.0),
+            (4232, 0.0), (4261, 0.0), (4292, 0.3)
+        ];
+        let t0 = 100.0;
+        let recorded = || Recorded {
+            frames: FRAMES
+                .iter()
+                .map(|&(ms, v2)| Frame {
+                    t: t0 + f64::from(ms) / 1000.0,
+                    v2,
+                    v1: 0.0,
+                })
+                .collect(),
+            outputs: vec![
+                (t0 + 0.009, 2112.0),
+                (t0 + 0.121, 1380.0),
+                (t0 + 0.209, 1380.0),
+            ],
+            now: t0,
+            last_sent: 2112.0,
+        };
+        let found = coarse(&mut recorded(), &MODEL, 1380.0, f64::NEG_INFINITY)
+            .await
+            .unwrap();
+        assert!(found.falling && !found.on_start);
+        assert!(
+            found.floor.level < 1.0 && found.floor.noise < 0.5,
+            "{:?}",
+            found.floor
+        );
+        assert!((6.0..9.0).contains(&found.height), "{}", found.height);
+        assert!((found.x_c + C_F - 1636.0).abs() < 40.0, "{}", found.x_c);
+        // The same frames with the least it was tuned to on the night's floor, 12 and more:
+        // none.
+        let old = Constants {
+            min_spike: 12.0,
+            ..MODEL
+        };
+        assert_eq!(
+            coarse(&mut recorded(), &old, 1380.0, f64::NEG_INFINITY)
+                .await
+                .err(),
+            Some(FocusNowOutcome::LowTexture)
+        );
+    }
+
+    #[test]
+    fn takes_a_hump_one_frame_wide_but_not_a_blip_on_a_flat_floor() {
+        // The hump at zoom 1.4 is 7 µs wide at half its height, a frame's 8.6 µs of travel at the
+        // coarse slew: one frame at its top, the ones either side under half of it.
+        let frames = |top: f64| -> Vec<Frame> {
+            (0..40)
+                .map(|i| Frame {
+                    t: f64::from(i) / 30.0,
+                    v2: if i == 20 { top } else { 0.0 },
+                    v1: 0.0,
+                })
+                .collect()
+        };
+        let floor = Floor::of(&frames(0.0), &frames(0.0)[..30]);
+        let least = floor.least(&MODEL);
+        assert_eq!(hump(&frames(6.0), floor, least, HUMP_SIDE), Some(20));
+        assert_eq!(hump(&frames(2.0), floor, least, HUMP_SIDE), None);
     }
 
     #[tokio::test]
