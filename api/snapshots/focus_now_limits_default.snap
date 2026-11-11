@@ -1,0 +1,16 @@
+---
+source: backend/libs/br4kcam_manager/tests/api_snapshots.rs
+expression: "FocusNowLimits::default()"
+---
+{
+  "sharpness": 0.7,
+  "max_seconds": 9.0,
+  "max_passes": 12,
+  "centre_zones": 3,
+  "retry_zones": 0,
+  "retry_first": false,
+  "estimator": "parabola",
+  "close": "parabola",
+  "certificate": "measured",
+  "converge": false
+}
