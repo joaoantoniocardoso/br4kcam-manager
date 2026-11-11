@@ -109,6 +109,10 @@ const RAMP_LEARN_RANGE: f64 = 8.0;
 /// µs.
 static BIASES: LazyLock<Mutex<HashMap<Uuid, [VecDeque<f64>; 3]>>> = LazyLock::new(Default::default);
 
+/// The focus input (the subject distance, which the zoom correlation keeps while the zoom moves)
+/// each camera's last run left on the slider; in memory only.
+static LANDED: LazyLock<Mutex<HashMap<Uuid, i64>>> = LazyLock::new(Default::default);
+
 /// The constants for a camera: its own coarse biases, once its runs measured them.
 fn constants(camera_uuid: Uuid) -> Constants {
     let mut k = CONSTANTS;
@@ -1270,6 +1274,20 @@ impl Window {
         (mid_point + (delta - 0.5) * range).floor() as i64
     }
 
+    /// The focus output the table gives at this zoom for a focus input, when the zoom's
+    /// correlation is on.
+    fn table(&self, input: Option<i64>) -> Option<f64> {
+        self.correlation.then_some(())?;
+        input.map(|input| self.output(input) as f64)
+    }
+
+    /// The focus input of a focus command in % (`follow`, then rounded).
+    fn input_of(&self, percent: f32) -> i64 {
+        let span = (self.input_max - self.input_min) as f64;
+        let value = f64::from(percent).clamp(0.0, 100.0);
+        (self.input_min as f64 + value * span / 100.0 + 0.5).floor() as i64
+    }
+
     /// Lowest and highest focus output over the focus slider, within the servo's reach.
     fn ends(&self) -> (f64, f64) {
         let (a, b) = (self.output(self.input_min), self.output(self.input_max));
@@ -1387,6 +1405,10 @@ impl Ending for LiveEnv {
     }
 
     async fn show(&mut self, percent: f32) {
+        LANDED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(self.camera_uuid, self.window.input_of(percent));
         // The script's input takes it, so the focus slider shows it and the zoom correlation
         // keeps it.
         if let Err(error) = autopilot::send_focus(self.camera_uuid, percent).await {
@@ -1570,6 +1592,16 @@ impl Env for LiveEnv {
         }
         self.wide
     }
+
+    fn prior(&self) -> Option<f64> {
+        // Where the table puts the last landing's subject distance at this zoom.
+        let landed = LANDED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&self.camera_uuid)
+            .copied();
+        self.window.table(landed)
+    }
 }
 
 #[cfg(test)]
@@ -1613,6 +1645,23 @@ mod tests {
         let span = (window.input_max - window.input_min) as f64;
         let value = f64::from(percent).clamp(0.0, 100.0);
         (window.input_min as f64 + value * span / 100.0 + 0.5).floor() as i64
+    }
+
+    #[test]
+    fn the_table_prior_follows_the_last_landing_along_the_zoom() {
+        let (near, far) = (window(1191), window(1771));
+        assert_eq!(near.table(None), None);
+        let input = near.input_of(50.0);
+        let landed = Some(input);
+        assert_eq!(near.table(landed), Some(near.output(input) as f64));
+        // The zoom moved: the same subject distance, the table's focus at the new zoom.
+        assert_eq!(far.table(landed), Some(far.output(input) as f64));
+        assert_ne!(far.table(landed), near.table(landed));
+        let off = Window {
+            correlation: false,
+            ..near
+        };
+        assert_eq!(off.table(landed), None);
     }
 
     #[test]
