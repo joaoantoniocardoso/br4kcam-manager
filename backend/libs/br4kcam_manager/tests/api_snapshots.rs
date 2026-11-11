@@ -20,7 +20,9 @@ use axum::{
 use br4kcam_api::{
     CameraStateEvent, ConnectionStats, SystemHealth, WsClientMessage, WsEvent, WsRequest,
     WsResponse, events,
-    pro::{FocusNowContinuous, FocusNowStatus, ProCapabilities, ProSettings, ProState},
+    pro::{
+        FocusNowContinuous, FocusNowLimits, FocusNowStatus, ProCapabilities, ProSettings, ProState,
+    },
 };
 use br4kcam_commands::CameraControl;
 use br4kcam_manager::web::routes::{
@@ -289,6 +291,14 @@ fn test_camera() -> (Uuid, Camera) {
     };
 
     (uuid, camera)
+}
+
+/// What a Focus now runs with when a client sets none: the contract's defaults.
+#[test]
+fn focus_now_limits_default() {
+    contract_settings().bind(|| {
+        assert_json_snapshot!("focus_now_limits_default", FocusNowLimits::default());
+    });
 }
 
 #[test]
