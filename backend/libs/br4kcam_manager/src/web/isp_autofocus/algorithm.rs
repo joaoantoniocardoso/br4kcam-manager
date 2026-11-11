@@ -1984,6 +1984,8 @@ mod tests {
         frames: Vec<Frame>,
         exposure: Vec<f64>,
         next_frame: f64,
+        /// The zoom table's focus (`Env::prior`).
+        prior: Option<f64>,
         /// What the run noted (`Env::note`).
         notes: Vec<(f64, Option<f64>)>,
         /// A wider window's hump height (none at 0), its frames, and whether the run reads them.
@@ -2016,6 +2018,7 @@ mod tests {
                 frames: Vec::new(),
                 exposure: Vec::new(),
                 next_frame: 0.0,
+                prior: None,
                 notes: Vec::new(),
                 wide_height: 0.0,
                 frames_wide: Vec::new(),
@@ -2149,6 +2152,10 @@ mod tests {
             self.wide = self.wide_height > 0.0;
             self.wide
         }
+
+        fn prior(&self) -> Option<f64> {
+            self.prior
+        }
     }
 
     /// An exponential-power hump at `d` from its peak over its height: of scale `sd` (its sd at
@@ -2191,6 +2198,46 @@ mod tests {
                     "{peak} from {start}: {landing:?}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn searches_near_the_start_first() {
+        // 20 µs from the peak, on either side of it: the pass that finds it starts within the
+        // first leg's reach of the start, not from the window's end after a sweep over all of it.
+        for (seed, peak, start) in [
+            (1, 1100.0, 1080.0),
+            (2, 1100.0, 1120.0),
+            (3, 1200.0, 1180.0),
+            (4, 1200.0, 1220.0),
+        ] {
+            let mut sim = Sim::new(seed, peak, start);
+            sim.prior = Some(peak);
+            sim.wait(0.5).await.unwrap();
+            let found = find(&mut sim, &MODEL).await.unwrap();
+            assert!(
+                (found.u0 - start).abs() <= REACH,
+                "{peak} from {start}: found by a pass from {}",
+                found.u0
+            );
+            // The table 100 µs off, or none: the window's end to end, as before.
+            for prior in [Some(start + 100.0), None] {
+                let mut sim = Sim::new(seed, peak, start);
+                sim.prior = prior;
+                sim.wait(0.5).await.unwrap();
+                let found = find(&mut sim, &MODEL).await.unwrap();
+                let (lo, hi) = sim.window;
+                assert!(found.end == lo || found.end == hi || found.u0 == lo || found.u0 == hi);
+            }
+            let mut sim = Sim::new(seed, peak, start);
+            sim.prior = Some(peak);
+            let landing = focus(&mut sim).await.unwrap();
+            sim.wait(0.6).await.unwrap();
+            assert!(
+                sim.error().abs() < 4.0,
+                "{peak} from {start}: {landing:?} {}",
+                sim.error()
+            );
         }
     }
 
