@@ -1071,7 +1071,8 @@ pub(crate) enum FallBack {
 /// `until` (the run's time limit): short of time, without the start's other side of the play,
 /// and without time for even that, it reads nothing (an error); unless `known` (the best's
 /// reading, the start's) says the best already beat the start: then it moves onto it, unread,
-/// when one move fits (no-peak runs end by about 8.2 s of 9, `reports/af-estimators.md` §9).
+/// whatever time is left (no-peak runs end by about 8.2 s of 9, `reports/af-estimators.md` §9):
+/// that one move may end past `until`, by its reach and settle.
 pub(crate) async fn fall_back<E: Env>(
     env: &mut E,
     k: &Constants,
@@ -1097,9 +1098,8 @@ pub(crate) async fn fall_back<E: Env>(
     }
     if !fits(env, &targets) {
         return match known {
-            Some((reading, start_reading))
-                if u.is_some() && env.now() + FALL_BACK_STEP <= until =>
-            {
+            // One move past `until` at most: the model's reach and settle, never the start.
+            Some((reading, start_reading)) if u.is_some() => {
                 let (hi, target) = (env.window().1, targets[0]);
                 let (t, from) = (env.now(), env.last_sent());
                 env.send(hi.min(target + k.h + tn.margin));
@@ -3066,13 +3066,17 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_on_a_best_already_read_when_time_is_short() {
-        // A no-peak run that ends with the time for one move, not for a reading (round 10 on the
-        // bridge: B's no-peak runs end at about 8.2 s of 9): onto the best position measured,
-        // unread, when its own reading already beat the start's; else nothing moves.
+        // A no-peak run that ends with little or no time (round 10 on the bridge: B's no-peak
+        // runs end at about 8.2 s of 9; live c10_235449 had 1.62 s, the best read 71.2 against
+        // 25.7 at the start): onto the best position measured, unread, when its own reading
+        // already beat the start's, ending past the limit by that one move at most; else nothing
+        // moves.
         for (known, room, kept) in [
-            (Some((1500.0, 20.0)), 1.5 * FALL_BACK_STEP, true),
+            (Some((71.2, 25.7)), 1.5 * FALL_BACK_STEP, true),
+            (Some((71.2, 25.7)), 1.62, true),
             (None, 1.5 * FALL_BACK_STEP, false),
-            (Some((1500.0, 20.0)), 0.5 * FALL_BACK_STEP, false),
+            (Some((71.2, 25.7)), 0.5 * FALL_BACK_STEP, true),
+            (Some((71.2, 25.7)), 0.0, true),
         ] {
             let output = (1140.0 + C_F).round();
             let mut sim = Sim::new(80, 1100.0, output);
@@ -3097,7 +3101,8 @@ mod tests {
                 (x - if kept { 1100.0 } else { 1140.0 }).abs() < 4.0,
                 "{case}"
             );
-            assert!(sim.now() - 0.6 <= until, "{case}");
+            // One reach and settle past the limit, never the 2.2 s of a reading.
+            assert!(sim.now() - 0.6 - until < FALL_BACK_STEP, "{case}");
         }
     }
 }
