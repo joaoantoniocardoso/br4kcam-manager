@@ -3063,4 +3063,41 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn falls_back_on_a_best_already_read_when_time_is_short() {
+        // A no-peak run that ends with the time for one move, not for a reading (round 10 on the
+        // bridge: B's no-peak runs end at about 8.2 s of 9): onto the best position measured,
+        // unread, when its own reading already beat the start's; else nothing moves.
+        for (known, room, kept) in [
+            (Some((1500.0, 20.0)), 1.5 * FALL_BACK_STEP, true),
+            (None, 1.5 * FALL_BACK_STEP, false),
+            (Some((1500.0, 20.0)), 0.5 * FALL_BACK_STEP, false),
+        ] {
+            let output = (1140.0 + C_F).round();
+            let mut sim = Sim::new(80, 1100.0, output);
+            sim.wait(0.5).await.unwrap();
+            let until = sim.now() + room;
+            let limits = FocusNowLimits::default();
+            let fell = fall_back(
+                &mut sim,
+                &MODEL,
+                &limits,
+                Some(1102.6),
+                output,
+                until,
+                known,
+            )
+            .await;
+            sim.wait(0.6).await.unwrap();
+            let x = sim.error() + 1100.0;
+            let case = format!("{known:?} {room}: {fell:?}, lens at {x}");
+            assert_eq!(matches!(fell, Ok(FallBack::Best(..))), kept, "{case}");
+            assert!(
+                (x - if kept { 1100.0 } else { 1140.0 }).abs() < 4.0,
+                "{case}"
+            );
+            assert!(sim.now() - 0.6 <= until, "{case}");
+        }
+    }
 }
