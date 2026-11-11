@@ -381,6 +381,29 @@ mod tests {
     }
 
     #[test]
+    fn focus_now_limits_from_older_files_take_the_parabolas() {
+        // Files from before the estimators: the defaults, the parabola on the ramp and at the
+        // landing and the measured certificate, without convergence alone.
+        let limits: FocusNowLimits =
+            serde_json::from_str(r#"{"sharpness": 0.7, "max_seconds": 9.0, "max_passes": 12}"#)
+                .unwrap();
+        assert_eq!(
+            (
+                limits.estimator,
+                limits.close,
+                limits.certificate,
+                limits.converge
+            ),
+            (
+                FocusNowEstimator::Parabola,
+                FocusNowClose::Parabola,
+                FocusNowCertificate::Measured,
+                false
+            )
+        );
+    }
+
+    #[test]
     fn focus_now_limits_survive_a_reload() {
         let RawSettingsData::V1(mut settings) =
             serde_json::from_str::<RawSettingsData>(SETTINGS_WITHOUT_LENS).unwrap()
