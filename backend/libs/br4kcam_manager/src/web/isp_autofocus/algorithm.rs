@@ -158,6 +158,9 @@ const TURN_SLACK: f64 = 10.0;
 pub(crate) const STILL_OVER_V2: f64 = 1.12;
 /// The sharpness a landing reports is certified with 90 % confidence: its one-sided z.
 const CONFIDENCE: f64 = 1.645;
+/// A frame's noise on the hump as a share of its height above the floor: live camera .10 reads
+/// 0.48 + 0.112 of its level, the floor's own noise being 5 to 20 times less in daylight.
+const HUMP_NOISE: f64 = 0.1;
 /// A falling step shorter than this, µs, keeps a third of the last landing's error, scatters
 /// `short_sd` and stops `short_stop` above its output (`reports/isp-af-r4.md`: 0.53 and 0.45).
 const SHORT: f64 = 10.0;
@@ -847,9 +850,10 @@ async fn search<E: Env>(
         floor.noise
     };
     // Over the peak's height at its upper bound: the passes measured it on frames of that noise.
-    let measured = |v: f64, h: f64| {
-        (above(v) - CONFIDENCE * floor.of_mean(noise, tn.read)) / (h + CONFIDENCE * floor.noise)
-    };
+    // The reading's noise is the hump's at its level, not the floor's.
+    let reading_sem = |v: f64| floor.of_mean(noise.max(HUMP_NOISE * above(v)), tn.read);
+    let measured =
+        |v: f64, h: f64| (above(v) - CONFIDENCE * reading_sem(v)) / (h + CONFIDENCE * floor.noise);
     // What the readings at rest `seen` bound the peak's height by: the monotone certificate's
     // bound ([`monotone`]), else the highest of them.
     let resting = |seen: &[(f64, f64)]| {
@@ -872,7 +876,7 @@ async fn search<E: Env>(
     // af-dark-frames.md`; in the dark, t9c said "focused" on blur 7 of 24 times, round 9): the
     // measured certificate takes nothing from it.
     let h_passes = (1.0 + tn.certify_margin) * h_ref;
-    let moved = |v: f64| above(v) > h_passes + CONFIDENCE * floor.of_mean(noise, tn.read);
+    let moved = |v: f64| above(v) > h_passes + CONFIDENCE * reading_sem(v);
     let certified = |v: f64, h: f64, q: f64, rest: f64| {
         h_measured && !moved(v) && measured(v, peak(h, rest)) >= q
     };
@@ -1999,6 +2003,10 @@ mod tests {
         /// and narrower the one below, as a fraction.
         shape: f64,
         skew: f64,
+        /// The hump's frame noise as a share of its level.
+        noise: f64,
+        /// v2 times `.2` from `.0` to `.1` s: a lucky reading.
+        boost: (f64, f64, f64),
     }
 
     impl Sim {
@@ -2028,6 +2036,8 @@ mod tests {
                 wide: false,
                 shape: 2.0,
                 skew: 0.0,
+                noise: 0.03,
+                boost: (0.0, 0.0, 1.0),
             }
         }
 
@@ -2042,12 +2052,18 @@ mod tests {
             } else {
                 self.height
             };
-            let noise = 1.0 + self.plant.rng.normal(0.03);
+            let noise = 1.0 + self.plant.rng.normal(self.noise);
             let low_end = self.low_end * (-0.5 * ((x - self.window.0) / 25.0).powi(2)).exp();
             let pedestal =
                 self.pedestal.0 * (-0.5 * ((x - self.peak) / self.pedestal.1).powi(2)).exp();
+            let lucky = if (self.boost.0..self.boost.1).contains(&self.plant.t) {
+                self.boost.2
+            } else {
+                1.0
+            };
             (height * generalized(x - self.peak, 3.4, self.shape, self.skew) + low_end + pedestal)
                 * noise
+                * lucky
         }
 
         fn v1(&mut self, x: f64) -> f64 {
@@ -3194,6 +3210,57 @@ mod tests {
         let (corrected, differences) = (median(corrected), median(differences));
         assert!((corrected - 150.0).abs() < 30.0, "{corrected}");
         assert!(differences < 90.0, "{differences}");
+    }
+
+    /// Camera .10's daylight hump at zoom 1.4 (20 on a floor of 0 ± 0.1), 80 runs of seeds and
+    /// starts, each twice: plain, and with the frames of its last stop `luck` times high, as the
+    /// live run `c10_135559_z1.4_9_q0.9` read them (22.5 over a rest level of 17: the hill climb
+    /// keeps the higher of its readings). How many of the plain and of the lucky runs say focused.
+    async fn lucky_last_stops(noise: f64, luck: f64, q: f32) -> (u32, u32) {
+        let mut focused = (0, 0);
+        for seed in 0..80u64 {
+            let peak = 1040.0 + 2.0 * (seed % 20) as f64;
+            let limits = FocusNowLimits {
+                sharpness: q,
+                ..FocusNowLimits::default()
+            };
+            let mut seconds = 0.0;
+            for boost in [false, true] {
+                let mut sim = Sim::new(seed, peak, if seed % 2 == 0 { 981.0 } else { 1296.0 });
+                (sim.height, sim.floor, sim.noise) = (20.0, (0.0, 0.1), noise);
+                sim.wait(0.5).await.unwrap();
+                if boost {
+                    let t0 = sim.plant.t + seconds;
+                    sim.boost = (t0 - 0.2, t0 + 0.01, luck);
+                }
+                if let Ok(landing) = run(&mut sim, &MODEL, &limits).await {
+                    seconds = if boost { seconds } else { landing.seconds };
+                    let says = landing.sharpness >= f64::from(q);
+                    if boost {
+                        focused.1 += says as u32;
+                    } else {
+                        focused.0 += says as u32;
+                    }
+                }
+            }
+        }
+        focused
+    }
+
+    #[tokio::test]
+    async fn does_not_certify_a_lucky_reading_against_itself() {
+        // The reading is certified against the highest reading at rest, which is itself: a
+        // climb that kept a lucky one said focused 58 of 80 times at Precise, against 12 of
+        // those that read no luck. Read again, none does better than without.
+        let (plain, lucky) = lucky_last_stops(0.1, 1.12, 0.9).await;
+        assert!(lucky <= plain + 2, "plain {plain} lucky {lucky}");
+    }
+
+    #[tokio::test]
+    async fn still_says_focused_on_a_quiet_daylight_hump() {
+        // 3 % noise, no luck, Balanced: landings on the peak are certified, the re-read included.
+        let (plain, lucky) = lucky_last_stops(0.03, 1.0, 0.7).await;
+        assert!(plain >= 60 && lucky >= 60, "plain {plain} lucky {lucky}");
     }
 
     #[tokio::test]
