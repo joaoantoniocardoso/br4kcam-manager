@@ -1052,6 +1052,7 @@ async fn conclude<E: Ending>(
             let mut focus = None;
             let mut message = message_of(outcome).to_string();
             let mut fallback = None;
+            let mut kept = false;
             if restore {
                 // The sharpest position it measured, when that beats the start at rest; else back
                 // where it started, never less sharp (the user's ask, `reports/isp-af-r5.md`,
@@ -1082,10 +1083,15 @@ async fn conclude<E: Ending>(
                     let percent = env.percent(env.last_sent());
                     env.show(percent).await;
                     focus = Some(percent);
+                    // A hump measured and not certified: approximate, with no sharpness claimed.
+                    if outcome == FocusNowOutcome::NoPeak {
+                        message = "Approximate: the peak could not be certified".to_string();
+                    }
                     message = format!(
                         "{message}: kept the sharpest position found ({reading:.0} against {start_reading:.0} where it started)"
                     );
                     fallback = Some(FocusNowFallback::KeptBest);
+                    kept = true;
                 } else {
                     if fell.is_none() {
                         env.send(start);
@@ -1099,6 +1105,11 @@ async fn conclude<E: Ending>(
                     fallback = Some(FocusNowFallback::RestoredStart);
                 }
             }
+            let outcome = if kept && outcome == FocusNowOutcome::NoPeak {
+                FocusNowOutcome::Approximate
+            } else {
+                outcome
+            };
             FocusNowResult {
                 fallback,
                 ..result(outcome, message, started, focus)
