@@ -1028,6 +1028,10 @@ async fn conclude<E: Ending>(
                     "Landed, but the centre is only {:.0} % as sharp as the peak the search saw: the scene changed or the landing missed",
                     100.0 * landing.ratio
                 );
+                // The lens stays where it landed, so the script's input has to follow: it
+                // keeps a focus a lease left until that input changes, and a later command of
+                // the value it still holds would move nothing.
+                env.show(focus).await;
                 FocusNowResult {
                     ratio,
                     focus: Some(focus),
@@ -1764,6 +1768,118 @@ mod tests {
         assert!(textured(&frames(110.0, 4.0)));
         assert!(!textured(&frames(110.0, 4.0)[..3]));
         assert!(!textured(&[]));
+    }
+
+    /// A run's end with nothing to measure: records what is shown on the slider.
+    struct Shown(Vec<f32>);
+
+    impl Env for Shown {
+        fn window(&self) -> (f64, f64) {
+            (870.0, 2130.0)
+        }
+        fn now(&self) -> f64 {
+            0.0
+        }
+        fn last_sent(&self) -> f64 {
+            1691.0
+        }
+        fn send(&mut self, _: f64) {}
+        async fn wait(&mut self, _: f64) -> Result<(), FocusNowOutcome> {
+            Ok(())
+        }
+        fn frames(&self, _: f64, _: f64) -> Vec<Frame> {
+            Vec::new()
+        }
+        fn outputs(&self, _: f64, _: f64) -> Vec<(f64, f64)> {
+            Vec::new()
+        }
+        fn phase(&mut self, _: FocusNowPhase) {}
+    }
+
+    impl Ending for Shown {
+        fn percent(&self, u: f64) -> f32 {
+            ((u - 870.0) / 12.6) as f32
+        }
+        fn start_output(&self) -> f64 {
+            1940.0
+        }
+        fn start_reading(&self) -> Option<(f64, f64)> {
+            None
+        }
+        fn best_measured(&self) -> Option<f64> {
+            None
+        }
+        fn wide(&self) -> bool {
+            false
+        }
+        fn narrow(&mut self) {}
+        async fn show(&mut self, percent: f32) {
+            self.0.push(percent);
+        }
+        async fn learned(&mut self, _: &Landing) {}
+    }
+
+    fn landing(ratio: f64, sharpness: f64) -> Landing {
+        Landing {
+            u: 1691.0,
+            ratio,
+            seconds: 8.0,
+            falling: true,
+            coarse_bias: 0.0,
+            ramp_bias: f64::NAN,
+            certified: false,
+            sharpness,
+            w: 3.4,
+            height: 50.0,
+            floor: Default::default(),
+            half_width: 4.0,
+            step: 2.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_landing_the_scene_changed_under_still_shows_its_focus() {
+        // Run .10 of 04:58:04: landed on 1691 at 45 % of the peak. The lens stays there, so the
+        // script's input follows, else a command of the value it still held (the user's 51.19)
+        // moves nothing.
+        let mut env = Shown(Vec::new());
+        let (result, watch_from) = conclude(
+            &mut env,
+            &CONSTANTS,
+            &FocusNowLimits::default(),
+            Ok(landing(0.45, 0.25)),
+            "again ",
+            Instant::now(),
+        )
+        .await;
+        assert_eq!(result.outcome, FocusNowOutcome::SceneChanged);
+        assert!(watch_from.is_none());
+        assert_eq!(env.0, vec![result.focus.unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_restored_the_start_or_stopped_shows_nothing() {
+        // `show` is where `LiveEnv` records the subject distance of the table's prior: only a run
+        // that landed on a measured position gets there.
+        for outcome in [
+            FocusNowOutcome::NoPeak,
+            FocusNowOutcome::LowTexture,
+            FocusNowOutcome::Stopped,
+            FocusNowOutcome::CommandLost,
+        ] {
+            let mut env = Shown(Vec::new());
+            let (result, _) = conclude(
+                &mut env,
+                &CONSTANTS,
+                &FocusNowLimits::default(),
+                Err(outcome),
+                "",
+                Instant::now(),
+            )
+            .await;
+            assert_eq!(result.outcome, outcome);
+            assert!(env.0.is_empty(), "{outcome:?}: {:?}", env.0);
+        }
     }
 
     #[test]
