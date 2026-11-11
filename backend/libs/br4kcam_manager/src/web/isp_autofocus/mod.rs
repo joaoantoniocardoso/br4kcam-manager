@@ -955,6 +955,10 @@ pub(crate) trait Ending: Env {
     fn start_reading(&self) -> Option<(f64, f64)>;
     /// Where a failed run falls back on, from its notes.
     fn best_measured(&self) -> Option<f64>;
+    /// The best reading at rest the run took, as (output, v2), if any.
+    fn best_reading(&self) -> Option<(f64, f64)> {
+        None
+    }
     /// Whether the run reads the retry window, and back to the centre's.
     fn wide(&self) -> bool;
     fn narrow(&mut self);
@@ -1059,8 +1063,17 @@ async fn conclude<E: Ending>(
                 // Within the run's time limit.
                 let until =
                     env.now() + f64::from(limits.max_seconds) - started.elapsed().as_secs_f64();
+                // Its best reading at rest, when it already beats the start's by four times their
+                // noise (taken as the start's): moved onto unread when nothing more fits.
+                let known = env
+                    .best_reading()
+                    .zip(env.start_reading())
+                    .filter(|&((u, v2), (start_v2, noise))| {
+                        Some(u) == best && v2 - start_v2 > 4.0 * noise * std::f64::consts::SQRT_2
+                    })
+                    .map(|((_, v2), (start_v2, _))| (v2, start_v2));
                 let fell = match env.start_reading() {
-                    Some(_) => algorithm::fall_back(env, k, limits, best, start, until)
+                    Some(_) => algorithm::fall_back(env, k, limits, best, start, until, known)
                         .await
                         .ok(),
                     None => None,
@@ -1116,7 +1129,7 @@ async fn widened<E: Ending>(
     };
     if worse {
         let until = env.now() + f64::from(limits.max_seconds) - started.elapsed().as_secs_f64();
-        let fell = algorithm::fall_back(env, k, limits, None, start, until).await;
+        let fell = algorithm::fall_back(env, k, limits, None, start, until, None).await;
         if fell.is_err() {
             env.send(start);
         }
@@ -1348,6 +1361,10 @@ impl Ending for LiveEnv {
 
     fn best_measured(&self) -> Option<f64> {
         LiveEnv::best_measured(self)
+    }
+
+    fn best_reading(&self) -> Option<(f64, f64)> {
+        self.best
     }
 
     fn wide(&self) -> bool {

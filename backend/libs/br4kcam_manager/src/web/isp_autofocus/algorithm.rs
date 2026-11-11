@@ -1069,7 +1069,9 @@ pub(crate) enum FallBack {
 /// the sharpest of them: the start's output unless another reads sharper by four times the
 /// readings' noise (in noise, a reading cannot tell the sides of the play apart). It ends by
 /// `until` (the run's time limit): short of time, without the start's other side of the play,
-/// and without time for even that, it reads nothing (an error).
+/// and without time for even that, it reads nothing (an error); unless `known` (the best's
+/// reading, the start's) says the best already beat the start: then it moves onto it, unread,
+/// when one move fits (no-peak runs end by about 8.2 s of 9, `reports/af-estimators.md` §9).
 pub(crate) async fn fall_back<E: Env>(
     env: &mut E,
     k: &Constants,
@@ -1077,6 +1079,7 @@ pub(crate) async fn fall_back<E: Env>(
     u: Option<f64>,
     start: f64,
     until: f64,
+    known: Option<(f64, f64)>,
 ) -> Result<FallBack, FocusNowOutcome> {
     let tn = tuning(limits.sharpness);
     let (lo, hi) = env.window();
@@ -1093,7 +1096,21 @@ pub(crate) async fn fall_back<E: Env>(
         targets.pop();
     }
     if !fits(env, &targets) {
-        return Err(FocusNowOutcome::Stopped);
+        return match known {
+            Some((reading, start_reading))
+                if u.is_some() && env.now() + FALL_BACK_STEP <= until =>
+            {
+                let (hi, target) = (env.window().1, targets[0]);
+                let (t, from) = (env.now(), env.last_sent());
+                env.send(hi.min(target + k.h + tn.margin));
+                settled(env, t, env.last_sent() - from, k, &tn).await?;
+                let t = env.now();
+                env.send(target);
+                settled(env, t, k.h + tn.margin, k, &tn).await?;
+                Ok(FallBack::Best(reading, start_reading))
+            }
+            _ => Err(FocusNowOutcome::Stopped),
+        };
     }
     let mut readings = Vec::with_capacity(targets.len());
     for &target in &targets {
