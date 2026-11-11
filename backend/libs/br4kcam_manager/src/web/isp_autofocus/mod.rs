@@ -711,16 +711,7 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
     // Continuous mode watches from a landing, and after a refocus that did not land it watches
     // on against the last landing, later.
     if continuous(camera_uuid).await
-        && let Some((scene, wait, fresh)) =
-            scene
-                .map(|scene| (scene, HOLD_OFF, true))
-                .or(failed_refocus.map(|seed| {
-                    if by_hand {
-                        (seed, HOLD_OFF, true)
-                    } else {
-                        (seed, BACKOFF, false)
-                    }
-                }))
+        && let Some((scene, wait, fresh)) = next_watch(scene, failed_refocus, by_hand)
     {
         let watch = tokio::spawn(watch(
             camera_uuid,
@@ -735,6 +726,19 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
             run.watch = Some(watch);
         }
     }
+}
+
+/// What the next watch starts from, how long it waits and whether its baseline is from now: a
+/// landing's, or a refocus that did not land, from where it settled (the last landing's baseline
+/// is one that refocus can fall short of again and again).
+fn next_watch(
+    scene: Option<Seed>,
+    failed_refocus: Option<Seed>,
+    by_hand: bool,
+) -> Option<(Seed, Duration, bool)> {
+    scene
+        .map(|scene| (scene, HOLD_OFF, true))
+        .or(failed_refocus.map(|seed| (seed, if by_hand { HOLD_OFF } else { BACKOFF }, true)))
 }
 
 /// The drop of v2 above the floor, from its baseline, that the watch takes for a loss of focus;
@@ -1760,6 +1764,29 @@ mod tests {
         assert!(textured(&frames(110.0, 4.0)));
         assert!(!textured(&frames(110.0, 4.0)[..3]));
         assert!(!textured(&[]));
+    }
+
+    #[test]
+    fn a_refocus_that_did_not_land_watches_from_where_it_settled() {
+        let seed = Seed {
+            mu: 1691.0,
+            var: 0.0,
+            w: 3.4,
+            height: 50.0,
+            floor: Default::default(),
+            half_width: 4.0,
+            step: 2.0,
+        };
+        // Its last landing's baseline is not kept: it would refocus again at each backoff.
+        assert_eq!(
+            next_watch(None, Some(seed), false),
+            Some((seed, BACKOFF, true))
+        );
+        assert_eq!(
+            next_watch(None, Some(seed), true),
+            Some((seed, HOLD_OFF, true))
+        );
+        assert_eq!(next_watch(None, None, false), None);
     }
 
     #[test]
