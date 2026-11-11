@@ -834,6 +834,41 @@ async fn search<E: Env>(
     // Every reading at rest, as (where the lens is, reading).
     let mut seen = vec![(target, stops[0].1)];
     passes += 1;
+    // A first landing under half the passes' height: the camera's learned ramp bias went stale
+    // (its zero walked, round 4 on camera .10; on the desk's bridge one 8 to 12 µs low dropped
+    // Balanced from 88 to 56–60 %). Again from the passes' own estimate without it, and nothing
+    // learned from the run.
+    let stale = k.ramp_learned > 0
+        && !ramp_raw.is_nan()
+        && above(stops[0].1) < 0.5 * h_ref
+        && passes < limits.max_passes
+        && elapsed(env) + tn.land < f64::from(limits.max_seconds);
+    if stale {
+        mu = ramp_raw;
+        let again = (mu - tn.v2_over_still).round().clamp(lo, hi);
+        if again != target {
+            let d = if again > target {
+                // Past the play, and back down onto it.
+                let t = env.now();
+                env.send(hi.min(again + k.h + tn.margin));
+                settled(env, t, env.last_sent() - target, k, &tn).await?;
+                k.h + tn.margin
+            } else {
+                target - again
+            };
+            let reading = stop(env, again, d, k, &tn).await?;
+            let x = again
+                + if again < target && d < SHORT {
+                    tn.short_stop
+                } else {
+                    0.0
+                };
+            info!("Focus now land: ramp bias stale, again at {again:.0} without it");
+            stops = vec![(again, reading, x)];
+            seen.push((x, reading));
+            passes += 1;
+        }
+    }
     // A reading is the mean of its frames: its noise is the frames' over their root count. With
     // the frames' own noise a weak hump (6 sd of a frame high) has no valid reading 2 µs off its
     // top (`reports/isp-af-r5.md`, round 7).
@@ -990,8 +1025,8 @@ async fn search<E: Env>(
         falling,
         // Against where it places the peak in the end, not where it landed: a landing certified
         // without a pair is the posterior itself, and teaches nothing.
-        coarse_bias: mu - k.c_f - x_raw,
-        ramp_bias: mu - ramp_raw,
+        coarse_bias: if stale { f64::NAN } else { mu - k.c_f - x_raw },
+        ramp_bias: if stale { f64::NAN } else { mu - ramp_raw },
         certified: ok,
         sharpness,
         w,
