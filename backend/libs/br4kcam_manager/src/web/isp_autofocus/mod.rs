@@ -737,6 +737,21 @@ async fn focus(mut env: LiveEnv, limits: FocusNowLimits, seed: Option<Seed>) {
     }
 }
 
+enum LensMove {
+    None,
+    Zoom,
+    Focus,
+}
+
+/// What a lens output reading says against the one before it.
+fn lens_move(before: Option<LensOutputs>, now: LensOutputs) -> LensMove {
+    match before {
+        Some(before) if before.zoom != now.zoom => LensMove::Zoom,
+        Some(before) if before.focus != now.focus => LensMove::Focus,
+        _ => LensMove::None,
+    }
+}
+
 /// Continuous mode: watches v2 at the centre after a landing (`scene`), and focuses again
 /// around where the lens is once it drops under the limit's sharpness less 0.1, or once a zoom
 /// move has ended. It watches v2 above the floor, its drop relative to the landing's, with no
@@ -761,6 +776,9 @@ fn watch(
         // Its drop from `base`, and where it focuses again for a drop past `level`.
         let fall = |base: f64, now: f64| 1.0 - now / base;
         let under = |base: f64, level: f64| base * (1.0 - level);
+        // The lens from the reported outputs, from the landing on, so a move of the user's own
+        // during the waits is seen; without them, no refocus on a zoom move.
+        let mut outputs = autopilot::watch_lens_outputs(camera_uuid).await.ok();
         tokio::time::sleep(wait).await;
         afstat::want(address, WANTED);
         tokio::time::sleep(Duration::from_secs_f64(BASELINE)).await;
@@ -786,8 +804,6 @@ fn watch(
             "Focus now watch of {camera_uuid}: v2 {base:.3} (now {mean:.3} ± {noise:.3}), focuses again under {:.3}",
             under(base, level)
         );
-        // The lens from the reported outputs; without them, no refocus on a zoom move.
-        let mut outputs = autopilot::watch_lens_outputs(camera_uuid).await.ok();
         let (mut lens, mut zoom_moved, mut moved, mut by_hand) = (
             None,
             None,
@@ -808,10 +824,10 @@ fn watch(
             }
             if let Some(receiver) = outputs.as_mut() {
                 while let Ok((_, now_lens)) = receiver.try_recv() {
-                    if lens.is_some_and(|lens: LensOutputs| lens.zoom != now_lens.zoom) {
-                        zoom_moved = Some(now());
-                    } else if lens.is_some_and(|lens| lens.focus != now_lens.focus) {
-                        by_hand = true;
+                    match lens_move(lens, now_lens) {
+                        LensMove::Zoom => zoom_moved = Some(now()),
+                        LensMove::Focus => by_hand = true,
+                        LensMove::None => {}
                     }
                     if lens.is_some_and(|lens| lens != now_lens) {
                         moved = now();
@@ -1735,5 +1751,25 @@ mod tests {
         assert!(textured(&frames(110.0, 4.0)));
         assert!(!textured(&frames(110.0, 4.0)[..3]));
         assert!(!textured(&[]));
+    }
+
+    #[test]
+    fn a_lens_output_that_differs_from_the_landing_is_by_hand() {
+        let at = |focus, zoom| LensOutputs { focus, zoom };
+        // The watch starts reading at the landing: its first reading is the landing's, and
+        // the user's move after it is seen (taken from the second reading on, it was not).
+        assert!(matches!(lens_move(None, at(1940, 1850)), LensMove::None));
+        assert!(matches!(
+            lens_move(Some(at(1698, 1850)), at(1940, 1850)),
+            LensMove::Focus
+        ));
+        assert!(matches!(
+            lens_move(Some(at(1698, 1850)), at(1698, 1700)),
+            LensMove::Zoom
+        ));
+        assert!(matches!(
+            lens_move(Some(at(1698, 1850)), at(1698, 1850)),
+            LensMove::None
+        ));
     }
 }
