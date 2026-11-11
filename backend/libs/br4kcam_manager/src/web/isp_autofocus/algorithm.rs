@@ -363,6 +363,10 @@ pub(crate) trait Env {
     fn widen(&mut self) -> bool {
         false
     }
+    /// The focus output (µs) the zoom's table gives for the current zoom, if the camera has one.
+    fn prior(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// Where a run left the focus.
@@ -440,16 +444,68 @@ struct Coarse {
     height: f64,
     x_raw: f64,
     x_c: f64,
+    /// Where the pass started and where it was sent, µs.
+    u0: f64,
+    end: f64,
 }
 
-async fn coarse<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOutcome> {
+/// How far from the start the coarse search's first leg goes, µs: the zoom's table leaves the
+/// lens within about 40 µs of the peak, and the spike is seen whole 50 µs past it.
+const REACH: f64 = 90.0;
+
+/// How far from the table's focus the start may be for the short first leg, µs: further off, the
+/// lens is not known to be near the peak and the leg only costs time.
+const GATE: f64 = 60.0;
+
+/// The coarse search: a short leg from the start towards the far end of the window, where the
+/// peak most likely is, then the rest of the window from end to end; each leg stops at the spike.
+/// The short leg only when the start is within `GATE` of the zoom's table, else the window twice.
+async fn find<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOutcome> {
     let (lo, hi) = env.window();
     let u0 = env.last_sent();
+    let down = (u0 - lo) >= (hi - u0);
+    let (far, near) = if down { (lo, hi) } else { (hi, lo) };
+    let first = if down {
+        (u0 - REACH).max(lo)
+    } else {
+        (u0 + REACH).min(hi)
+    };
+    let near_table = env.prior().is_some_and(|table| (u0 - table).abs() <= GATE);
+    let legs = if !near_table || first == far || u0 <= lo || u0 >= hi {
+        vec![far, near]
+    } else {
+        vec![first, near, far]
+    };
+    let local = legs.len() == 3;
+    let mut floor_from = f64::NEG_INFINITY;
+    for (i, end) in legs.into_iter().enumerate() {
+        if (end - env.last_sent()).abs() >= 1.0 {
+            match coarse(env, k, end, floor_from).await {
+                // After the short leg only: the frames from before the lens left the start are not
+                // the floor of the leg after it (a lens that rested on the peak), and the
+                // sweeps over the whole window keep their second of frames at rest (a blinking light).
+                Err(FocusNowOutcome::LowTexture) if local && i == 0 => {
+                    floor_from = env.now() - REST
+                }
+                Err(FocusNowOutcome::LowTexture) => {}
+                found => return found,
+            }
+        }
+    }
+    Err(FocusNowOutcome::LowTexture)
+}
 
-    // 1. Coarse: one jump to the far end of the window, watching the v2 spike.
+/// One leg of the coarse search: a jump to `end`, watching the v2 spike.
+async fn coarse<E: Env>(
+    env: &mut E,
+    k: &Constants,
+    end: f64,
+    floor_from: f64,
+) -> Result<Coarse, FocusNowOutcome> {
+    let u0 = env.last_sent();
+
     env.phase(FocusNowPhase::Coarse);
-    let falling = (u0 - lo) >= (hi - u0);
-    let end = if falling { lo } else { hi };
+    let falling = end < u0;
     let v = if falling { k.v_f } else { k.v_r };
     // A second of frames at rest first, for its floor's noise: a slow flicker of the scene in
     // them (a blinking LED's 1 Hz square wave in the real dark, round 10) and not taken for a
@@ -462,6 +518,8 @@ async fn coarse<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOu
         wait(env, FRAME).await?;
     }
     let t0 = env.now();
+    // Not before the lens settled after the leg before: its frames hold that leg's steps.
+    let from = (t0 - FLOOR_REST).max(floor_from);
     env.send(end);
     // A late jump shifts the whole timeline: anchored on its report.
     let tc = confirm(env, t0).await?;
@@ -480,9 +538,9 @@ async fn coarse<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOu
         // the frames since tell whether the lens rested on the peak.
         let moving = frames.iter().filter(|frame| frame.t >= t_on).count();
         // With the frames at rest before it: more of them for the noise.
-        let rest = env.frames(t0 - FLOOR_REST, t_on);
+        let rest = env.frames(from, t_on);
         let start = on_start(&frames, &rest, t_on, k);
-        let floor = start.unwrap_or(Floor::of(&env.frames(t0 - FLOOR_REST, env.now()), &rest));
+        let floor = start.unwrap_or(Floor::of(&env.frames(from, env.now()), &rest));
         let spike = (start.is_none() && moving >= FLOOR_FRAMES)
             .then(|| hump(&frames, floor, floor.least(k), HUMP_SIDE))
             .flatten();
@@ -542,6 +600,8 @@ async fn coarse<E: Env>(env: &mut E, k: &Constants) -> Result<Coarse, FocusNowOu
         height: frames[i].v2 - floor.level,
         x_raw,
         x_c,
+        u0,
+        end,
     })
 }
 
@@ -553,9 +613,10 @@ async fn search<E: Env>(
 ) -> Result<Landing, FocusNowOutcome> {
     let (lo, hi) = env.window();
     let t_start = env.now();
-    let u0 = env.last_sent();
     let tn = tuning(limits.sharpness);
     let Coarse {
+        u0,
+        end,
         falling,
         v,
         tc,
@@ -577,27 +638,18 @@ async fn search<E: Env>(
             height: seed.height,
             x_raw: f64::NAN,
             x_c: seed.mu - k.c_f,
+            u0: env.last_sent(),
+            end: lo,
         },
-        None => match coarse(env, k).await {
-            // Started between the peak and the nearer end, the pass went the other way: once
-            // more from the end it reached, over the whole window.
-            // Still nothing (or at once, with `retry_first`): on the wider window, when the
-            // limits have one (a dark or flat centre, `reports/isp-af-r5.md`, rounds 8 and 9).
-            Err(FocusNowOutcome::LowTexture)
-                if limits.retry_first && limits.retry_zones > 0 && env.widen() =>
-            {
-                coarse(env, k).await?
+        // Nothing in the whole window: on the wider window, when the limits have one (a dark or
+        // flat centre, `reports/isp-af-r5.md`, rounds 8 and 9).
+        None => match find(env, k).await {
+            Err(FocusNowOutcome::LowTexture) if limits.retry_zones > 0 && env.widen() => {
+                find(env, k).await?
             }
-            Err(FocusNowOutcome::LowTexture) => match coarse(env, k).await {
-                Err(FocusNowOutcome::LowTexture) if limits.retry_zones > 0 && env.widen() => {
-                    coarse(env, k).await?
-                }
-                coarse => coarse?,
-            },
             coarse => coarse?,
         },
     };
-    let end = if falling { lo } else { hi };
     if !x_c.is_nan() {
         env.note(x_c + k.c_f, None);
     }
