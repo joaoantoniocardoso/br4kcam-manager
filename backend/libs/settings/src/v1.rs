@@ -404,6 +404,24 @@ mod tests {
     }
 
     #[test]
+    fn focus_now_limits_with_values_not_offered_take_the_defaults() {
+        // Files from other builds may hold a selection this one does not offer.
+        let limits: FocusNowLimits = serde_json::from_str(
+            r#"{"sharpness": 0.7, "max_seconds": 9.0, "max_passes": 12,
+                "estimator": "retired", "close": "retired", "certificate": "retired"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (limits.estimator, limits.close, limits.certificate),
+            (
+                FocusNowEstimator::Parabola,
+                FocusNowClose::Parabola,
+                FocusNowCertificate::Measured
+            )
+        );
+    }
+
+    #[test]
     fn focus_now_limits_survive_a_reload() {
         let RawSettingsData::V1(mut settings) =
             serde_json::from_str::<RawSettingsData>(SETTINGS_WITHOUT_LENS).unwrap()
