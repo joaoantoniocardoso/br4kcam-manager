@@ -1055,11 +1055,29 @@ async fn search<E: Env>(
         passes += 1;
     }
     let now = env.now();
-    let (landed, v_landed, _) = stops[stops.len() - 1];
+    let (landed, mut v_landed, _) = stops[stops.len() - 1];
+    // A reading over the passes' height, past its own noise, is the highest of the readings the
+    // climb chose from: it is also the `rest` it would be measured against, so it certifies itself
+    // (live, 22.5 over 20.3 said "at least 99 %" on a lens 3 µs off, the rest level 17). Read the
+    // landing again, on frames the choice did not see, and certify that.
+    let mut selected = h_measured && above(v_landed) > h_ref + CONFIDENCE * reading_sem(v_landed);
+    if selected && elapsed(env) + f64::from(tn.read) * FRAME < f64::from(limits.max_seconds) {
+        let now = env.now();
+        wait(env, f64::from(tn.read) * FRAME).await?;
+        let frames = env.frames(now, env.now());
+        if !frames.is_empty() {
+            v_landed = frames.iter().map(|frame| frame.v2).sum::<f64>() / frames.len() as f64;
+            info!("Focus now land: {landed:.0} read again: v2 {v_landed:.1}");
+            if let Some(last) = seen.last_mut() {
+                last.1 = v_landed;
+            }
+            selected = false;
+        }
+    }
     let rest = resting(&seen);
-    let ok = certified(v_landed, h_ref, q_claim, rest);
+    let ok = !selected && certified(v_landed, h_ref, q_claim, rest);
     // What it can certify, at the 90 % the result promises, whatever the preset certifies at.
-    let sharpness = if !h_measured || moved(v_landed) {
+    let sharpness = if !h_measured || selected || moved(v_landed) {
         0.0
     } else {
         measured(v_landed, peak(h_ref, rest)).clamp(0.0, 1.0)
