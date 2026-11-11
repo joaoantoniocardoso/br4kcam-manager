@@ -3023,4 +3023,44 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn says_focused_on_no_blinking_light_in_the_dark() {
+        // The real dark's 1 Hz flicker (round 10): a blinking LED on the scene, a square wave of
+        // 320 at the centre, 50 % on, flat in focus, over 4200 with frame noise sd 46. Half a
+        // period of it inside the coarse pass looked like a hump to a floor taken over a fraction
+        // of a second in one of its states; nothing is a peak here, at any preset.
+        for (estimator, close, certificate) in SHORTLISTED {
+            for seed in 500..800u64 {
+                for sharpness in [0.5, 0.7, 0.9] {
+                    let mut sim = Sim::new(
+                        seed,
+                        1000.0 + 6.0 * (seed % 40) as f64,
+                        if seed % 2 == 0 { 981.0 } else { 1296.0 },
+                    );
+                    (sim.height, sim.floor) = (0.0, (4200.0, 46.0));
+                    sim.flicker = (320.0, 1.0, Rng(seed).uniform());
+                    sim.wait(0.2).await.unwrap();
+                    let limits = FocusNowLimits {
+                        sharpness,
+                        estimator,
+                        close,
+                        certificate,
+                        ..FocusNowLimits::default()
+                    };
+                    let landed = run(&mut sim, &MODEL, &limits).await;
+                    let case = format!(
+                        "{estimator:?} {close:?} {certificate:?} {seed} {sharpness}: {landed:?}"
+                    );
+                    assert!(
+                        landed.is_err_and(|outcome| matches!(
+                            outcome,
+                            FocusNowOutcome::LowTexture | FocusNowOutcome::NoPeak
+                        )) || landed.is_ok_and(|landing| landing.sharpness < f64::from(sharpness)),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
 }
